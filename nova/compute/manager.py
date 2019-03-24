@@ -2167,10 +2167,11 @@ class ComputeManager(manager.Manager):
                     LOG.debug('Start spawning the instance on the hypervisor.',
                               instance=instance)
                     with timeutils.StopWatch() as timer:
-                        self.driver.spawn(context, instance, image_meta,
-                                          injected_files, admin_password,
-                                          allocs, network_info=network_info,
-                                          block_device_info=block_device_info)
+                        pass
+                        # self.driver.spawn(context, instance, image_meta,
+                        #                   injected_files, admin_password,
+                        #                   allocs, network_info=network_info,
+                        #                   block_device_info=block_device_info)
                     LOG.info('Took %0.2f seconds to spawn the instance on '
                              'the hypervisor.', timer.elapsed(),
                              instance=instance)
