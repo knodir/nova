@@ -1,0 +1,3 @@
+[submodule "npp"]
+	path = npp
+	url = git@github.com:knodir/npp.git

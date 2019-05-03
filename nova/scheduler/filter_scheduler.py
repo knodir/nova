@@ -25,6 +25,7 @@ from oslo_log import log as logging
 from six.moves import range
 
 from nova.compute import utils as compute_utils
+from nova.scheduler.host_manager import HostState
 import nova.conf
 from nova import exception
 from nova.i18n import _
@@ -148,8 +149,37 @@ class FilterScheduler(driver.Scheduler):
         # Note: remember, we are using a generator-iterator here. So only
         # traverse this list once. This can bite you if the hosts
         # are being scanned in a filter or weighing function.
-        hosts = self._get_all_host_states(elevated, spec_obj,
-            provider_summaries)
+        
+        # NPP NOTE: comment out call to get real host states
+        # hosts = self._get_all_host_states(elevated, spec_obj,
+        #     provider_summaries)
+        
+        def build_simulated_host_state(provider, summary):
+            cpu_used = summary["resources"]["VCPU"]["used"]
+            cpu_capacity = summary["resources"]["VCPU"]["capacity"]
+            ram_used = summary["resources"]["MEMORY_MB"]["used"]
+            ram_capacity = summary["resources"]["MEMORY_MB"]["capacity"]
+            disk_used = summary["resources"]["DISK_GB"]["used"]
+            disk_capacity = summary["resources"]["DISK_GB"]["capacity"]
+            hs = HostState(CONF.npp.simulated_host, CONF.npp.simulated_host, 
+                CONF.npp.target_cell_uuid)
+
+            hs.uuid = provider
+            hs.total_usable_ram_mb = ram_capacity
+            hs.total_usable_disk_gb = disk_capacity
+            hs.disk_mb_used = disk_used * 1000
+            hs.free_ram_mb = ram_capacity - ram_used
+            hs.free_disk_mb = disk_capacity * 100 - disk_used * 1000
+            hs.vcpus_total = cpu_capacity
+            hs.vcpus_used = cpu_used
+            hs.ram_allocation_ratio = 1
+            hs.cpu_allocation_ratio = 1
+            hs.disk_allocation_ratio = 1
+            hs.failed_builds = 0
+            return hs
+        
+        hosts = (build_simulated_host_state(provider, summary) \
+            for provider, summary in provider_summaries.items())
 
         # NOTE(sbauza): The RequestSpec.num_instances field contains the number
         # of instances created when the RequestSpec was used to first boot some

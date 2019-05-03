@@ -163,9 +163,9 @@ class Claim(NopClaim):
                    self._test_numa_topology(resources, numa_topology_limit),
                    self._test_pci()]
         reasons = [r for r in reasons if r is not None]
-        if len(reasons) > 0:
-            raise exception.ComputeResourcesUnavailable(reason=
-                    "; ".join(reasons))
+        # if len(reasons) > 0:
+        #     raise exception.ComputeResourcesUnavailable(reason=
+        #             "; ".join(reasons))
 
         LOG.info('Claim successful on node %s', self.nodename,
                  instance=self.instance)

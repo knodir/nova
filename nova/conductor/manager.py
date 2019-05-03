@@ -1481,6 +1481,8 @@ class ComputeTaskManager(base.Base):
             # pass the objects.
             legacy_secgroups = [s.identifier
                                 for s in request_spec.security_groups]
+            host.service_host = CONF.npp.simulated_host
+            host.nodename = CONF.npp.simulated_host
             with obj_target_cell(instance, cell) as cctxt:
                 self.compute_rpcapi.build_and_run_instance(
                     cctxt, instance=instance, image=image,

@@ -52,7 +52,7 @@ class BaseHostFilter(filters.BaseFilter):
 
 class HostFilterHandler(filters.BaseFilterHandler):
     def __init__(self):
-        super(HostFilterHandler, self).__init__(BaseHostFilter)
+        super(HostFilterHandler, self).__init__(filters.BaseFilter)
 
 
 def all_filters():
