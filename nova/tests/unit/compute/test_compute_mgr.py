@@ -2956,6 +2956,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
     def test_extend_volume(self):
         inst_obj = objects.Instance(id=3, uuid=uuids.instance)
         connection_info = {'foo': 'bar'}
+        new_size = 20
         bdm = objects.BlockDeviceMapping(
             source_type='volume',
             destination_type='volume',
@@ -2973,13 +2974,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         def do_test(bdm_save, bdm_get_by_vol_and_inst, extend_volume,
                     volume_api):
             bdm_get_by_vol_and_inst.return_value = bdm
-            volume_api.get.return_value = {'size': 20}
+            volume_api.get.return_value = {'size': new_size}
 
             self.compute.extend_volume(
                 self.context, inst_obj, uuids.volume_id)
             bdm_save.assert_called_once_with()
             extend_volume.assert_called_once_with(
-                connection_info, inst_obj)
+                connection_info, inst_obj, new_size * pow(1024, 3))
 
         do_test()
 
@@ -4960,6 +4961,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 vm_state=vm_states.ACTIVE,
                 expected_attrs=['metadata', 'system_metadata', 'info_cache'])
         self.instance.trusted_certs = None  # avoid lazy-load failures
+        self.instance.pci_requests = None  # avoid lazy-load failures
         self.admin_pass = 'pass'
         self.injected_files = []
         self.image = {}
@@ -6637,6 +6639,129 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             self.context, self.instance, self.requested_networks,
             self.security_groups, {uuids.port1: [uuids.rp1]})
 
+    def test_build_with_resource_request_sriov_port(self):
+        request_spec = objects.RequestSpec(
+            requested_resources=[
+                objects.RequestGroup(
+                    requester_id=uuids.port1,
+                    provider_uuids=[uuids.rp1])])
+
+        # NOTE(gibi): the first request will not match to any request group
+        # this is the case when the request is not coming from a Neutron port
+        # but from flavor or when the instance is old enough that the
+        # requester_id field is not filled.
+        # The second request will match with the request group in the request
+        # spec and will trigger an update on that pci request.
+        # The third request is coming from a Neutron port which doesn't have
+        # resource request and therefore no matching request group exists in
+        # the request spec.
+        self.instance.pci_requests = objects.InstancePCIRequests(requests=[
+            objects.InstancePCIRequest(),
+            objects.InstancePCIRequest(
+                requester_id=uuids.port1,
+                spec=[{'vendor_id': '1377', 'product_id': '0047'}]),
+            objects.InstancePCIRequest(requester_id=uuids.port2),
+        ])
+        with test.nested(
+                mock.patch.object(self.compute.driver, 'spawn'),
+                mock.patch.object(self.compute,
+                    '_build_networks_for_instance', return_value=[]),
+                mock.patch.object(self.instance, 'save'),
+                mock.patch('nova.scheduler.client.report.'
+                           'SchedulerReportClient._get_resource_provider'),
+        ) as (mock_spawn, mock_networks, mock_save, mock_get_rp):
+            mock_get_rp.return_value = {
+                'uuid': uuids.rp1,
+                'name': 'compute1:sriov-agent:ens3'
+            }
+            self.compute._build_and_run_instance(
+                self.context,
+                self.instance, self.image, self.injected_files,
+                self.admin_pass, self.requested_networks,
+                self.security_groups, self.block_device_mapping, self.node,
+                self.limits, self.filter_properties, request_spec)
+
+        mock_networks.assert_called_once_with(
+            self.context, self.instance, self.requested_networks,
+            self.security_groups, {uuids.port1: [uuids.rp1]})
+        mock_get_rp.assert_called_once_with(self.context, uuids.rp1)
+        # As the second pci request matched with the request group from the
+        # request spec. So that pci request is extended with the
+        # parent_ifname calculated from the corresponding RP name.
+        self.assertEqual(
+            [{'parent_ifname': 'ens3',
+              'vendor_id': '1377',
+              'product_id': '0047'}],
+            self.instance.pci_requests.requests[1].spec)
+        # the rest of the pci requests are unchanged
+        self.assertNotIn('spec', self.instance.pci_requests.requests[0])
+        self.assertNotIn('spec', self.instance.pci_requests.requests[2])
+
+    def test_build_with_resource_request_sriov_rp_not_found(self):
+        request_spec = objects.RequestSpec(
+            requested_resources=[
+                objects.RequestGroup(
+                    requester_id=uuids.port1,
+                    provider_uuids=[uuids.rp1])])
+
+        self.instance.pci_requests = objects.InstancePCIRequests(requests=[
+            objects.InstancePCIRequest(requester_id=uuids.port1)])
+        with mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                         '_get_resource_provider') as (mock_get_rp):
+            mock_get_rp.return_value = None
+
+            self.assertRaises(
+                exception.ResourceProviderNotFound,
+                self.compute._build_and_run_instance,
+                self.context,
+                self.instance, self.image, self.injected_files,
+                self.admin_pass, self.requested_networks,
+                self.security_groups, self.block_device_mapping, self.node,
+                self.limits, self.filter_properties, request_spec)
+
+    def test_build_with_resource_request_sriov_rp_wrongly_formatted_name(self):
+        request_spec = objects.RequestSpec(
+            requested_resources=[
+                objects.RequestGroup(
+                    requester_id=uuids.port1,
+                    provider_uuids=[uuids.rp1])])
+
+        self.instance.pci_requests = objects.InstancePCIRequests(requests=[
+            objects.InstancePCIRequest(requester_id=uuids.port1)])
+        with mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                         '_get_resource_provider') as (mock_get_rp):
+            mock_get_rp.return_value = {
+                'uuid': uuids.rp1,
+                'name': 'my-awesome-rp'
+            }
+            self.assertRaises(
+                exception.BuildAbortException,
+                self.compute._build_and_run_instance,
+                self.context,
+                self.instance, self.image, self.injected_files,
+                self.admin_pass, self.requested_networks,
+                self.security_groups, self.block_device_mapping, self.node,
+                self.limits, self.filter_properties, request_spec)
+
+    def test_build_with_resource_request_more_than_one_providers(self):
+        request_spec = objects.RequestSpec(
+            requested_resources=[
+                objects.RequestGroup(
+                    requester_id=uuids.port1,
+                    provider_uuids=[uuids.rp1, uuids.rp2])])
+
+        self.instance.pci_requests = objects.InstancePCIRequests(requests=[
+            objects.InstancePCIRequest(requester_id=uuids.port1)])
+
+        self.assertRaises(
+            exception.BuildAbortException,
+            self.compute._build_and_run_instance,
+            self.context,
+            self.instance, self.image, self.injected_files,
+            self.admin_pass, self.requested_networks,
+            self.security_groups, self.block_device_mapping, self.node,
+            self.limits, self.filter_properties, request_spec)
+
 
 class ComputeManagerErrorsOutMigrationTestCase(test.NoDBTestCase):
     def setUp(self):
@@ -7090,7 +7215,7 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase,
                                                        self.instance,
                                                        self.migration)
         mock_report.delete_allocation_for_instance.assert_called_once_with(
-            self.context, self.migration.uuid)
+            self.context, self.migration.uuid, consumer_type='migration')
 
     def test_revert_allocation(self):
         """New-style migration-based allocation revert."""

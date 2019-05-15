@@ -1788,7 +1788,7 @@ def instance_destroy(context, instance_uuid, constraint=None):
     if uuidutils.is_uuid_like(instance_uuid):
         instance_ref = _instance_get_by_uuid(context, instance_uuid)
     else:
-        raise exception.InvalidUUID(instance_uuid)
+        raise exception.InvalidUUID(uuid=instance_uuid)
 
     query = model_query(context, models.Instance).\
                     filter_by(uuid=instance_uuid)
@@ -2772,7 +2772,7 @@ def _instance_metadata_update_in_place(context, instance, metadata_type, model,
 
 def _instance_update(context, instance_uuid, values, expected, original=None):
     if not uuidutils.is_uuid_like(instance_uuid):
-        raise exception.InvalidUUID(instance_uuid)
+        raise exception.InvalidUUID(uuid=instance_uuid)
 
     if expected is None:
         expected = {}
@@ -5546,10 +5546,10 @@ def _archive_deleted_rows_for_table(tablename, max_rows):
                 from_select(columns, sql.select([table], column.in_(records)))
         delete = table.delete().where(column.in_(records))
         # NOTE(tssurya): In order to facilitate the deletion of records from
-        # instance_mappings and request_specs tables in the nova_api DB, the
-        # rows of deleted instances from the instances table are stored prior
-        # to their deletion. Basically the uuids of the archived instances
-        # are queried and returned.
+        # instance_mappings, request_specs and instance_group_member tables in
+        # the nova_api DB, the rows of deleted instances from the instances
+        # table are stored prior to their deletion. Basically the uuids of the
+        # archived instances are queried and returned.
         if tablename == "instances":
             query_select = sql.select([table.c.uuid], table.c.id.in_(records))
             rows = conn.execute(query_select).fetchall()

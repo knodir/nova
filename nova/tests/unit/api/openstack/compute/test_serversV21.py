@@ -4357,12 +4357,16 @@ class ServersControllerCreateTest(test.TestCase):
     @mock.patch('nova.virt.hardware.numa_get_constraints')
     def _test_create_instance_numa_topology_wrong(self, exc,
                                                   numa_constraints_mock):
-        numa_constraints_mock.side_effect = exc(**{'name': None,
-                                                   'cpunum': 0,
-                                                   'cpumax': 0,
-                                                   'cpuset': None,
-                                                   'memsize': 0,
-                                                   'memtotal': 0})
+        numa_constraints_mock.side_effect = exc(**{
+            'name': None,
+            'source': 'flavor',
+            'requested': 'dummy',
+            'available': str(objects.fields.CPUAllocationPolicy.ALL),
+            'cpunum': 0,
+            'cpumax': 0,
+            'cpuset': None,
+            'memsize': 0,
+            'memtotal': 0})
         self.req.body = jsonutils.dump_as_bytes(self.body)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.create, self.req, body=self.body)
@@ -4374,6 +4378,8 @@ class ServersControllerCreateTest(test.TestCase):
                     exception.ImageNUMATopologyCPUOutOfRange,
                     exception.ImageNUMATopologyCPUDuplicates,
                     exception.ImageNUMATopologyCPUsUnassigned,
+                    exception.InvalidCPUAllocationPolicy,
+                    exception.InvalidCPUThreadAllocationPolicy,
                     exception.ImageNUMATopologyMemoryOutOfRange]:
             self._test_create_instance_numa_topology_wrong(exc)
 
@@ -6062,8 +6068,18 @@ class ServersControllerCreateTest(test.TestCase):
                            alias='fake_name'))
     def test_create_instance_pci_alias_not_defined(self, mock_create):
         # Tests that PciRequestAliasNotDefined is translated to a 400 error.
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self._test_create_extra, {})
+        ex = self.assertRaises(webob.exc.HTTPBadRequest,
+                               self._test_create_extra, {})
+        self.assertIn('PCI alias fake_name is not defined', six.text_type(ex))
+
+    @mock.patch.object(compute_api.API, 'create',
+                       side_effect=exception.PciInvalidAlias(
+                           reason='just because'))
+    def test_create_instance_pci_invalid_alias(self, mock_create):
+        # Tests that PciInvalidAlias is translated to a 400 error.
+        ex = self.assertRaises(webob.exc.HTTPBadRequest,
+                               self._test_create_extra, {})
+        self.assertIn('Invalid PCI alias definition', six.text_type(ex))
 
     def test_create_instance_with_user_data(self):
         value = base64.encode_as_text("A random string")

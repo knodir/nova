@@ -50,6 +50,7 @@ from oslo_service import periodic_task
 from oslo_utils import excutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
+from oslo_utils import units
 import six
 from six.moves import range
 
@@ -962,11 +963,10 @@ class ComputeManager(manager.Manager):
             LOG.debug(e, instance=instance)
         except exception.VirtualInterfacePlugException:
             # NOTE(mriedem): If we get here, it could be because the vif_type
-            # in the cache is "binding_failed" or "unbound".  The only way to
-            # fix this is to try and bind the ports again, which would be
-            # expensive here on host startup. We could add a check to
-            # _heal_instance_info_cache to handle this, but probably only if
-            # the instance task_state is None.
+            # in the cache is "binding_failed" or "unbound".
+            # The periodic task _heal_instance_info_cache checks for this
+            # condition. It should fix this by binding the ports again when
+            # it gets to this instance.
             LOG.exception('Virtual interface plugging failed for instance. '
                           'The port binding:host_id may need to be manually '
                           'updated.', instance=instance)
@@ -2115,6 +2115,61 @@ class ComputeManager(manager.Manager):
         else:
             return None
 
+    def _update_pci_request_spec_with_allocated_interface_name(
+            self, context, instance, request_group_resource_providers_mapping):
+        if not instance.pci_requests:
+            return
+
+        def needs_update(pci_request, mapping):
+            return (pci_request.requester_id
+                    and pci_request.requester_id in mapping)
+
+        modified = False
+        for pci_request in instance.pci_requests.requests:
+            if needs_update(
+                    pci_request, request_group_resource_providers_mapping):
+
+                provider_uuids = request_group_resource_providers_mapping[
+                    pci_request.requester_id]
+
+                if len(provider_uuids) != 1:
+                    reason = (
+                        'Allocating resources from more than one resource '
+                        'providers %(providers)s for a single pci request '
+                        '%(requester)s is not supported.' %
+                        {'providers': provider_uuids,
+                         'requester': pci_request.requester_id})
+                    raise exception.BuildAbortException(
+                        instance_uuid=instance.uuid,
+                        reason=reason)
+
+                dev_rp_name = self.reportclient.get_resource_provider_name(
+                    context,
+                    provider_uuids[0])
+
+                # NOTE(gibi): the device RP name reported by neutron is
+                # structured like <hostname>:<agentname>:<interfacename>
+                rp_name_pieces = dev_rp_name.split(':')
+                if len(rp_name_pieces) != 3:
+                    reason = (
+                        'Resource provider %(provider)s used to allocate '
+                        'resources for the pci request %(requester)s does not '
+                        'have properly formatted name. Expected name format '
+                        'is <hostname>:<agentname>:<interfacename>, but got '
+                        '%(provider_name)s' %
+                        {'provider': provider_uuids[0],
+                         'requester': pci_request.requester_id,
+                         'provider_name': dev_rp_name})
+                    raise exception.BuildAbortException(
+                        instance_uuid=instance.uuid,
+                        reason=reason)
+
+                for spec in pci_request.spec:
+                    spec['parent_ifname'] = rp_name_pieces[2]
+                    modified = True
+        if modified:
+            instance.save()
+
     def _build_and_run_instance(self, context, instance, image, injected_files,
             admin_password, requested_networks, security_groups,
             block_device_mapping, node, limits, filter_properties,
@@ -2135,6 +2190,13 @@ class ComputeManager(manager.Manager):
 
         self._check_device_tagging(requested_networks, block_device_mapping)
         self._check_trusted_certs(instance)
+
+        request_group_resource_providers_mapping = \
+            self._get_request_group_mapping(request_spec)
+
+        if request_group_resource_providers_mapping:
+            self._update_pci_request_spec_with_allocated_interface_name(
+                context, instance, request_group_resource_providers_mapping)
 
         try:
             scheduler_hints = self._get_scheduler_hints(filter_properties,
@@ -3993,7 +4055,7 @@ class ComputeManager(manager.Manager):
             # NOTE(danms): We're finishing on the source node, so try
             # to delete the allocation based on the migration uuid
             self.reportclient.delete_allocation_for_instance(
-                context, migration.uuid)
+                context, migration.uuid, consumer_type='migration')
         except exception.AllocationDeleteFailed:
             LOG.error('Deleting allocation in placement for migration '
                       '%(migration_uuid)s failed. The instance '
@@ -7117,6 +7179,25 @@ class ComputeManager(manager.Manager):
             action=fields.NotificationAction.LIVE_MIGRATION_ROLLBACK_DEST,
             phase=fields.NotificationPhase.END)
 
+    def _require_nw_info_update(self, context, instance):
+        """Detect whether there is a mismatch in binding:host_id, or
+        binding_failed or unbound binding:vif_type for any of the instances
+        ports.
+        """
+        if not utils.is_neutron():
+            return False
+        search_opts = {'device_id': instance.uuid,
+                       'fields': ['binding:host_id', 'binding:vif_type']}
+        ports = self.network_api.list_ports(context, **search_opts)
+        for p in ports['ports']:
+            if p.get('binding:host_id') != self.host:
+                return True
+            vif_type = p.get('binding:vif_type')
+            if (vif_type == network_model.VIF_TYPE_UNBOUND or
+                    vif_type == network_model.VIF_TYPE_BINDING_FAILED):
+                return True
+        return False
+
     @periodic_task.periodic_task(
         spacing=CONF.heal_instance_info_cache_interval)
     def _heal_instance_info_cache(self, context):
@@ -7195,6 +7276,15 @@ class ComputeManager(manager.Manager):
         if instance:
             # We have an instance now to refresh
             try:
+                # Fix potential mismatch in port binding if evacuation failed
+                # after reassigning the port binding to the dest host but
+                # before the instance host is changed.
+                # Do this only when instance has no pending task.
+                if instance.task_state is None and \
+                        self._require_nw_info_update(context, instance):
+                    LOG.info("Updating ports in neutron", instance=instance)
+                    self.network_api.setup_instance_network_on_host(
+                        context, instance, self.host)
                 # Call to network API to get instance info.. this will
                 # force an update to the instance's info_cache
                 self.network_api.get_instance_nw_info(
@@ -8210,7 +8300,8 @@ class ComputeManager(manager.Manager):
 
         try:
             self.driver.extend_volume(connection_info,
-                                      instance)
+                                      instance,
+                                      bdm.volume_size * units.Gi)
         except Exception as ex:
             LOG.warning('Extend volume failed, '
                         'volume_id=%(volume_id)s, reason: %(msg)s',

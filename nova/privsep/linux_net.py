@@ -136,6 +136,57 @@ def bind_ip(device, ip, scope_is_link=False):
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
+def unbind_ip(device, ip):
+    processutils.execute('ip', 'addr', 'del', str(ip) + '/32',
+                         'dev', device, check_exit_code=[0, 2, 254])
+
+
+def lookup_ip(device):
+    return processutils.execute('ip', 'addr', 'show', 'dev', device,
+                                'scope', 'global')
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def change_ip(device, ip):
+    processutils.execute('ip', '-f', 'inet6', 'addr', 'change', ip,
+                         'dev', device)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def dhcp_release(dev, address, mac_address):
+    processutils.execute('dhcp_release', dev, address, mac_address)
+
+
+def routes_show(dev):
+    # Format of output is:
+    #     192.168.1.0/24  proto kernel  scope link  src 192.168.1.6
+    return processutils.execute('ip', 'route', 'show', 'dev', dev)
+
+
+# TODO(mikal): this is horrid. The calling code takes arguments from a route
+# list and just regurgitates them into new routes. This isn't good enough,
+# but is outside the scope of the privsep transition. Mark it as bonkers and
+# hope we clean it up later.
+@nova.privsep.sys_admin_pctxt.entrypoint
+def route_add_horrid(routes):
+    processutils.execute('ip', 'route', 'add', *routes)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def route_delete(dev, route):
+    processutils.execute('ip', 'route', 'del', route, 'dev', dev)
+
+
+# TODO(mikal): this is horrid. The calling code takes arguments from a route
+# list and just regurgitates them into new routes. This isn't good enough,
+# but is outside the scope of the privsep transition. Mark it as bonkers and
+# hope we clean it up later.
+@nova.privsep.sys_admin_pctxt.entrypoint
+def route_delete_horrid(dev, routes):
+    processutils.execute('ip', 'route', 'del', *routes)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
 def create_tap_dev(dev, mac_address=None, multiqueue=False):
     _create_tap_dev_inner(dev, mac_address=mac_address,
                           multiqueue=multiqueue)
@@ -163,3 +214,22 @@ def _create_tap_dev_inner(dev, mac_address=None, multiqueue=False):
         if mac_address:
             _set_device_macaddr_inner(dev, mac_address)
         _set_device_enabled_inner(dev)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def send_arp_for_ip(ip, device, count):
+    out, err = processutils.execute(
+        'arping', '-U', ip, '-A', '-I', device, '-c', str(count),
+        check_exit_code=False)
+
+    if err:
+        LOG.debug('arping error for IP %s', ip)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def clean_conntrack(fixed_ip):
+    try:
+        processutils.execute('conntrack', '-D', '-r', fixed_ip,
+                             check_exit_code=[0, 1])
+    except processutils.ProcessExecutionError:
+        LOG.exception('Error deleting conntrack entries for %s', fixed_ip)

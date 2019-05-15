@@ -1927,6 +1927,7 @@ class _ComputeAPIUnitTestMixIn(object):
                 self.context, fake_inst['uuid'], 'finished')
             mock_inst_save.assert_called_once_with(expected_task_state=[None])
 
+    @mock.patch('nova.compute.api.API._validate_flavor_image_nostatus')
     @mock.patch('nova.objects.Migration')
     @mock.patch.object(compute_api.API, '_record_action_start')
     @mock.patch.object(quotas_obj.Quotas, 'limit_check_project_and_user')
@@ -1939,7 +1940,8 @@ class _ComputeAPIUnitTestMixIn(object):
     def _test_resize(self, mock_get_all_by_host,
                      mock_get_by_instance_uuid, mock_get_flavor, mock_upsize,
                      mock_inst_save, mock_count, mock_limit, mock_record,
-                     mock_migration, flavor_id_passed=True,
+                     mock_migration, mock_validate,
+                     flavor_id_passed=True,
                      same_host=False, allow_same_host=False,
                      project_id=None,
                      extra_kwargs=None,
@@ -2088,6 +2090,12 @@ class _ComputeAPIUnitTestMixIn(object):
                 mock_upsize.assert_called_once_with(
                     test.MatchType(objects.Flavor),
                     test.MatchType(objects.Flavor))
+                image_meta = utils.get_image_from_system_metadata(
+                    fake_inst.system_metadata)
+                if not same_flavor:
+                    mock_validate.assert_called_once_with(
+                        self.context, image_meta, new_flavor, root_bdm=None,
+                        validate_pci=True)
                 # mock.ANY might be 'instances', 'cores', or 'ram'
                 # depending on how the deltas dict is iterated in check_deltas
                 mock_count.assert_called_once_with(
@@ -2102,6 +2110,9 @@ class _ComputeAPIUnitTestMixIn(object):
 
                 mock_inst_save.assert_called_once_with(
                     expected_task_state=[None])
+            else:
+                # This is a migration
+                mock_validate.assert_not_called()
 
             if self.cell_type == 'api' and request_spec:
                 mock_migration.assert_called_once_with(context=self.context)
@@ -2290,6 +2301,7 @@ class _ComputeAPIUnitTestMixIn(object):
                               self.compute_api.resize, self.context,
                               fake_inst, flavor_id='flavor-id')
 
+    @mock.patch('nova.compute.api.API._validate_flavor_image_nostatus')
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch('nova.compute.api.API._record_action_start')
     @mock.patch('nova.compute.api.API._resize_cells_support')
@@ -2300,7 +2312,8 @@ class _ComputeAPIUnitTestMixIn(object):
                                                       resize_instance_mock,
                                                       cells_support_mock,
                                                       record_mock,
-                                                      get_by_inst):
+                                                      get_by_inst,
+                                                      validate_mock):
         params = dict(image_ref='')
         fake_inst = self._create_instance_obj(params=params)
 
@@ -2856,7 +2869,6 @@ class _ComputeAPIUnitTestMixIn(object):
         # carried from sys_meta into image property...since it should be set
         # explicitly by _create_image() in compute api.
         fake_image_meta = {
-            'is_public': True,
             'name': 'base-name',
             'disk_format': 'fake',
             'container_format': 'fake',
@@ -2874,7 +2886,7 @@ class _ComputeAPIUnitTestMixIn(object):
         }
         image_type = is_snapshot and 'snapshot' or 'backup'
         sent_meta = {
-            'is_public': False,
+            'visibility': 'private',
             'name': 'fake-name',
             'disk_format': 'fake',
             'container_format': 'fake',
@@ -3140,7 +3152,7 @@ class _ComputeAPIUnitTestMixIn(object):
                            'ram_disk': 'fake_ram_disk_id'},
             'size': 0,
             'min_disk': '22',
-            'is_public': False,
+            'visibility': 'private',
             'min_ram': '11',
         }
         if quiesce_required:
@@ -4865,6 +4877,8 @@ class _ComputeAPIUnitTestMixIn(object):
                              inst_mapping_mock.instance_uuid)
             self.assertIsNone(inst_mapping_mock.cell_mapping)
             self.assertEqual(ctxt.project_id, inst_mapping_mock.project_id)
+            # Verify that the instance mapping created has user_id populated.
+            self.assertEqual(ctxt.user_id, inst_mapping_mock.user_id)
         do_test()
 
     @mock.patch.object(objects.service, 'get_minimum_version_all_cells',
@@ -5746,6 +5760,8 @@ class _ComputeAPIUnitTestMixIn(object):
                                                  None,
                                                  limit=3)
 
+    @mock.patch('nova.compute.api.API._save_user_id_in_instance_mapping',
+                new=mock.MagicMock())
     @mock.patch.object(objects.Instance, 'get_by_uuid')
     def test_get_instance_from_cell_success(self, mock_get_inst):
         cell_mapping = objects.CellMapping(uuid=uuids.cell1,
@@ -5773,9 +5789,11 @@ class _ComputeAPIUnitTestMixIn(object):
             im, [], False)
         self.assertIn('could not be found', six.text_type(exp))
 
+    @mock.patch('nova.compute.api.API._save_user_id_in_instance_mapping')
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch('nova.context.scatter_gather_cells')
-    def test_get_instance_with_cell_down_support(self, mock_sg, mock_rs):
+    def test_get_instance_with_cell_down_support(self, mock_sg, mock_rs,
+                                                 mock_save_uid):
         cell_mapping = objects.CellMapping(uuid=uuids.cell1,
                                            name='1', id=1)
         im1 = objects.InstanceMapping(instance_uuid=uuids.inst1,
@@ -5827,6 +5845,8 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertEqual(uuids.inst2, result.uuid)
         self.assertEqual('nova', result.availability_zone)
         self.assertEqual(uuids.image, result.image_ref)
+        # Verify that user_id is populated during a compute_api.get().
+        mock_save_uid.assert_called_once_with(im2, result)
 
         # Same as above, but boot-from-volume where image is not None but the
         # id of the image is not set.
@@ -5890,6 +5910,8 @@ class _ComputeAPIUnitTestMixIn(object):
                                 'security_groups', 'info_cache'])
         self.assertEqual(instance, inst_from_build_req)
 
+    @mock.patch('nova.compute.api.API._save_user_id_in_instance_mapping',
+                new=mock.MagicMock())
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(objects.BuildRequest, 'get_by_instance_uuid')
     @mock.patch.object(objects.Instance, 'get_by_uuid')
@@ -5975,11 +5997,34 @@ class _ComputeAPIUnitTestMixIn(object):
                                                       'info_cache'])
             self.assertEqual(instance, inst_from_get)
 
+    @mock.patch('nova.objects.InstanceMapping.save')
+    def test_save_user_id_in_instance_mapping(self, im_save):
+        # Verify user_id is populated if it not set
+        im = objects.InstanceMapping()
+        i = objects.Instance(user_id='fake')
+        self.compute_api._save_user_id_in_instance_mapping(im, i)
+        self.assertEqual(im.user_id, i.user_id)
+        im_save.assert_called_once_with()
+        # Verify user_id is not saved if it is already set
+        im_save.reset_mock()
+        im.user_id = 'fake-other'
+        self.compute_api._save_user_id_in_instance_mapping(im, i)
+        self.assertNotEqual(im.user_id, i.user_id)
+        im_save.assert_not_called()
+        # Verify user_id is not saved if it is None
+        im_save.reset_mock()
+        im = objects.InstanceMapping()
+        i = objects.Instance(user_id=None)
+        self.compute_api._save_user_id_in_instance_mapping(im, i)
+        self.assertNotIn('user_id', im)
+        im_save.assert_not_called()
+
+    @mock.patch('nova.compute.api.API._save_user_id_in_instance_mapping')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(objects.BuildRequest, 'get_by_instance_uuid')
     @mock.patch.object(objects.Instance, 'get_by_uuid')
     def test_get_instance_in_cell(self, mock_get_inst, mock_get_build_req,
-            mock_get_inst_map):
+            mock_get_inst_map, mock_save_uid):
         self.useFixture(nova_fixtures.AllServicesCurrent())
         # This just checks that the instance is looked up normally and not
         # synthesized from a BuildRequest object. Verification of pulling the
@@ -5997,6 +6042,8 @@ class _ComputeAPIUnitTestMixIn(object):
         if self.cell_type is None:
             mock_get_inst_map.assert_called_once_with(self.context,
                                                       instance.uuid)
+            # Verify that user_id is populated during a compute_api.get().
+            mock_save_uid.assert_called_once_with(inst_map, instance)
         else:
             self.assertFalse(mock_get_inst_map.called)
         self.assertEqual(instance, returned_inst)
@@ -6416,6 +6463,18 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
                      for call in mock_get_service.call_args_list]
             self.assertEqual(['context-for-%s' % c for c in compute_api.CELLS],
                              cells)
+
+    @mock.patch('nova.pci.request.get_pci_requests_from_flavor')
+    def test_pci_validated(self, mock_request):
+        """Tests that calling _validate_flavor_image_nostatus() with
+        validate_pci=True results in get_pci_requests_from_flavor() being
+        called.
+        """
+        image = dict(id=uuids.image_id, status='foo')
+        flavor = self._create_flavor()
+        self.compute_api._validate_flavor_image_nostatus(self.context,
+            image, flavor, root_bdm=None, validate_pci=True)
+        mock_request.assert_called_once_with(flavor)
 
     def test_validate_and_build_base_options_translate_neutron_secgroup(self):
         """Tests that _check_requested_secgroups will return a uuid for a

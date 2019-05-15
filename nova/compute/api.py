@@ -245,6 +245,17 @@ def load_cells():
         LOG.error('No cells are configured, unable to continue')
 
 
+def _get_image_meta_obj(image_meta_dict):
+    try:
+        image_meta = objects.ImageMeta.from_dict(image_meta_dict)
+    except ValueError as e:
+        # there must be invalid values in the image meta properties so
+        # consider this an invalid request
+        msg = _('Invalid image metadata. Error: %s') % six.text_type(e)
+        raise exception.InvalidRequest(msg)
+    return image_meta
+
+
 @profiler.trace_cls("compute_api")
 class API(base.Base):
     """API for interacting with the compute manager."""
@@ -522,13 +533,58 @@ class API(base.Base):
         # reason, we rely on the DB to cast True to a String.
         return True if bool_val else ''
 
-    def _check_requested_image(self, context, image_id, image,
-                               instance_type, root_bdm):
+    def _validate_flavor_image(self, context, image_id, image,
+                               instance_type, root_bdm, validate_numa=True):
+        """Validate the flavor and image.
+
+        This is called from the API service to ensure that the flavor
+        extra-specs and image properties are self-consistent and compatible
+        with each other.
+
+        :param context: A context.RequestContext
+        :param image_id: UUID of the image
+        :param image: a dict representation of the image including properties,
+                      enforces the image status is active.
+        :param instance_type: Flavor object
+        :param root_bdm: BlockDeviceMapping for root disk.  Will be None for
+               the resize case.
+        :param validate_numa: Flag to indicate whether or not to validate
+               the NUMA-related metadata.
+        :raises: Many different possible exceptions.  See
+                 api.openstack.compute.servers.INVALID_FLAVOR_IMAGE_EXCEPTIONS
+                 for the full list.
+        """
+        if image and image['status'] != 'active':
+            raise exception.ImageNotActive(image_id=image_id)
+        self._validate_flavor_image_nostatus(context, image, instance_type,
+                                             root_bdm, validate_numa)
+
+    @staticmethod
+    def _validate_flavor_image_nostatus(context, image, instance_type,
+                                        root_bdm, validate_numa=True,
+                                        validate_pci=False):
+        """Validate the flavor and image.
+
+        This is called from the API service to ensure that the flavor
+        extra-specs and image properties are self-consistent and compatible
+        with each other.
+
+        :param context: A context.RequestContext
+        :param image: a dict representation of the image including properties,
+                      enforces the image status is active.
+        :param instance_type: Flavor object
+        :param root_bdm: BlockDeviceMapping for root disk.  Will be None for
+               the resize case.
+        :param validate_numa: Flag to indicate whether or not to validate
+               the NUMA-related metadata.
+        :param validate_pci: Flag to indicate whether or not to validate
+               the PCI-related metadata.
+        :raises: Many different possible exceptions.  See
+                 api.openstack.compute.servers.INVALID_FLAVOR_IMAGE_EXCEPTIONS
+                 for the full list.
+        """
         if not image:
             return
-
-        if image['status'] != 'active':
-            raise exception.ImageNotActive(image_id=image_id)
 
         image_properties = image.get('properties', {})
         config_drive_option = image_properties.get(
@@ -607,6 +663,19 @@ class API(base.Base):
                 if not context.can(
                         servers_policies.ZERO_DISK_FLAVOR, fatal=False):
                     raise exception.BootFromVolumeRequiredForZeroDiskFlavor()
+
+        image_meta = _get_image_meta_obj(image)
+
+        # Only validate values of flavor/image so the return results of
+        # following 'get' functions are not used.
+        hardware.get_number_of_serial_ports(instance_type, image_meta)
+        if hardware.is_realtime_enabled(instance_type):
+            hardware.vcpus_realtime_topology(instance_type, image_meta)
+        hardware.get_cpu_topology_constraints(instance_type, image_meta)
+        if validate_numa:
+            hardware.numa_get_constraints(instance_type, image_meta)
+        if validate_pci:
+            pci_request.get_pci_requests_from_flavor(instance_type)
 
     def _get_image_defined_bdms(self, instance_type, image_meta,
                                 root_device_name):
@@ -733,11 +802,13 @@ class API(base.Base):
 
     def _checks_for_create_and_rebuild(self, context, image_id, image,
                                        instance_type, metadata,
-                                       files_to_inject, root_bdm):
+                                       files_to_inject, root_bdm,
+                                       validate_numa=True):
         self._check_metadata_properties_quota(context, metadata)
         self._check_injected_file_quota(context, files_to_inject)
-        self._check_requested_image(context, image_id, image,
-                                    instance_type, root_bdm)
+        self._validate_flavor_image(context, image_id, image,
+                                    instance_type, root_bdm,
+                                    validate_numa=validate_numa)
 
     def _validate_and_build_base_options(self, context, instance_type,
                                          boot_meta, image_href, image_id,
@@ -790,13 +861,7 @@ class API(base.Base):
                 block_device.properties_root_device_name(
                     boot_meta.get('properties', {})))
 
-        try:
-            image_meta = objects.ImageMeta.from_dict(boot_meta)
-        except ValueError as e:
-            # there must be invalid values in the image meta properties so
-            # consider this an invalid request
-            msg = _('Invalid image metadata. Error: %s') % six.text_type(e)
-            raise exception.InvalidRequest(msg)
+        image_meta = _get_image_meta_obj(boot_meta)
         numa_topology = hardware.numa_get_constraints(
                 instance_type, image_meta)
 
@@ -947,6 +1012,7 @@ class API(base.Base):
                 inst_mapping = objects.InstanceMapping(context=context)
                 inst_mapping.instance_uuid = instance_uuid
                 inst_mapping.project_id = context.project_id
+                inst_mapping.user_id = context.user_id
                 inst_mapping.cell_mapping = None
                 inst_mapping.create()
 
@@ -1185,9 +1251,11 @@ class API(base.Base):
 
         # We can't do this check earlier because we need bdms from all sources
         # to have been merged in order to get the root bdm.
+        # Set validate_numa=False since numa validation is already done by
+        # _validate_and_build_base_options().
         self._checks_for_create_and_rebuild(context, image_id, boot_meta,
                 instance_type, metadata, injected_files,
-                block_device_mapping.root_bdm())
+                block_device_mapping.root_bdm(), validate_numa=False)
 
         instance_group = self._get_requested_instance_group(context,
                                    filter_properties)
@@ -2066,7 +2134,9 @@ class API(base.Base):
 
     def _confirm_resize_on_deleting(self, context, instance):
         # If in the middle of a resize, use confirm_resize to
-        # ensure the original instance is cleaned up too
+        # ensure the original instance is cleaned up too along
+        # with its allocations (and migration-based allocations)
+        # in placement.
         migration = None
         for status in ('finished', 'confirming'):
             try:
@@ -2391,6 +2461,18 @@ class API(base.Base):
             inst_map = None
         return inst_map
 
+    @staticmethod
+    def _save_user_id_in_instance_mapping(mapping, instance):
+        # TODO(melwitt): We take the opportunity to migrate user_id on the
+        # instance mapping if it's not yet been migrated. This can be removed
+        # in a future release, when all migrations are complete.
+        # If the instance came from a RequestSpec because of a down cell, its
+        # user_id could be None and the InstanceMapping.user_id field is
+        # non-nullable. Avoid trying to set/save the user_id in that case.
+        if 'user_id' not in mapping and instance.user_id is not None:
+            mapping.user_id = instance.user_id
+            mapping.save()
+
     def _get_instance_from_cell(self, context, im, expected_attrs,
                                 cell_down_support):
         # NOTE(danms): Even though we're going to scatter/gather to the
@@ -2404,7 +2486,9 @@ class API(base.Base):
             expected_attrs=expected_attrs)
         cell_uuid = im.cell_mapping.uuid
         if not nova_context.is_cell_failure_sentinel(result[cell_uuid]):
-            return result[cell_uuid]
+            inst = result[cell_uuid]
+            self._save_user_id_in_instance_mapping(im, inst)
+            return inst
         elif isinstance(result[cell_uuid], exception.InstanceNotFound):
             raise exception.InstanceNotFound(instance_id=uuid)
         elif cell_down_support:
@@ -2424,7 +2508,7 @@ class API(base.Base):
                 # and its id.
                 image_ref = (rs.image.id if rs.image and
                              'id' in rs.image else None)
-                return objects.Instance(context=context, power_state=0,
+                inst = objects.Instance(context=context, power_state=0,
                                         uuid=uuid,
                                         project_id=im.project_id,
                                         created_at=im.created_at,
@@ -2432,6 +2516,8 @@ class API(base.Base):
                                         flavor=rs.flavor,
                                         image_ref=image_ref,
                                         availability_zone=rs.availability_zone)
+                self._save_user_id_in_instance_mapping(im, inst)
+                return inst
             except exception.RequestSpecNotFound:
                 # could be that a deleted instance whose request
                 # spec has been archived is being queried.
@@ -3009,7 +3095,7 @@ class API(base.Base):
         :returns: the new image metadata
         """
         image_meta = compute_utils.initialize_instance_snapshot_metadata(
-            instance, name, extra_properties)
+            context, instance, name, extra_properties)
         # the new image is simply a bucket of properties (particularly the
         # block device mapping, kernel and ramdisk IDs) with no image data,
         # hence the zero size
@@ -3545,6 +3631,14 @@ class API(base.Base):
             self._check_quota_for_upsize(context, instance,
                                          current_instance_type,
                                          new_instance_type)
+
+        if not same_instance_type:
+            image = utils.get_image_from_system_metadata(
+                instance.system_metadata)
+            # Can skip root_bdm check since it will not change during resize.
+            self._validate_flavor_image_nostatus(
+                context, image, new_instance_type, root_bdm=None,
+                validate_pci=True)
 
         filter_properties = {'ignore_hosts': []}
 
@@ -5267,7 +5361,8 @@ class AggregateAPI(base.Base):
             aggregate.name = values.pop('name')
             aggregate.save()
         self.is_safe_to_update_az(context, values, aggregate=aggregate,
-                                  action_name=AGGREGATE_ACTION_UPDATE)
+                                  action_name=AGGREGATE_ACTION_UPDATE,
+                                  check_no_instances_in_az=True)
         if values:
             aggregate.update_metadata(values)
             aggregate.updated_at = timeutils.utcnow()
@@ -5283,7 +5378,8 @@ class AggregateAPI(base.Base):
         """Updates the aggregate metadata."""
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
         self.is_safe_to_update_az(context, metadata, aggregate=aggregate,
-                                  action_name=AGGREGATE_ACTION_UPDATE_META)
+                                  action_name=AGGREGATE_ACTION_UPDATE_META,
+                                  check_no_instances_in_az=True)
         aggregate.update_metadata(metadata)
         self.query_client.update_aggregates(context, [aggregate])
         # If updated metadata include availability_zones, then the cache
@@ -5325,7 +5421,8 @@ class AggregateAPI(base.Base):
 
     def is_safe_to_update_az(self, context, metadata, aggregate,
                              hosts=None,
-                             action_name=AGGREGATE_ACTION_ADD):
+                             action_name=AGGREGATE_ACTION_ADD,
+                             check_no_instances_in_az=False):
         """Determine if updates alter an aggregate's availability zone.
 
             :param context: local context
@@ -5333,7 +5430,9 @@ class AggregateAPI(base.Base):
             :param aggregate: Aggregate to update
             :param hosts: Hosts to check. If None, aggregate.hosts is used
             :type hosts: list
-            :action_name: Calling method for logging purposes
+            :param action_name: Calling method for logging purposes
+            :param check_no_instances_in_az: if True, it checks
+                there is no instances on any hosts of the aggregate
 
         """
         if 'availability_zone' in metadata:
@@ -5354,6 +5453,18 @@ class AggregateAPI(base.Base):
                         "%s") % conflicting_azs
                 self._raise_invalid_aggregate_exc(action_name, aggregate.id,
                                                   msg)
+            same_az_name = (aggregate.availability_zone ==
+                            metadata['availability_zone'])
+            if check_no_instances_in_az and not same_az_name:
+                instance_count_by_cell = (
+                    nova_context.scatter_gather_skip_cell0(
+                        context,
+                        objects.InstanceList.get_count_by_hosts,
+                        _hosts))
+                if any(cnt for cnt in instance_count_by_cell.values()):
+                    msg = _("One or more hosts contain instances in this zone")
+                    self._raise_invalid_aggregate_exc(
+                        action_name, aggregate.id, msg)
 
     def _raise_invalid_aggregate_exc(self, action_name, aggregate_id, reason):
         if action_name == AGGREGATE_ACTION_ADD:

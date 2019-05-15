@@ -39,7 +39,6 @@
       - openstack/nova
       - openstack/tempest
     irrelevant-files: *dsvm-irrelevant-files
-    nodeset: legacy-ubuntu-xenial-2-node
 
 - job:
     name: nova-tox-functional
@@ -63,7 +62,7 @@
 
 - job:
     name: nova-tox-functional-py35
-    parent: openstack-tox
+    parent: openstack-tox-functional-py35
     description: |
       Run tox-based functional tests for the OpenStack Nova project
       under cPython version 3.5. with Nova specific irrelevant-files list.
@@ -118,8 +117,27 @@
       Run tempest live migration tests against both local storage and shared
       storage using ceph (the environment is reconfigured for ceph after the
       local storage tests are run). Also runs simple evacuate tests.
+      Config drive is forced on all instances.
     run: playbooks/legacy/nova-live-migration/run.yaml
     post-run: playbooks/legacy/nova-live-migration/post.yaml
+    irrelevant-files: &live-migration-irrelevant-files
+      # We define our own irrelevant-files because we need to run
+      # this if there are changes to nova/tests/live_migration/.
+      # TODO(mriedem): Move the nova/tests/live_migration/ scripts to gate/
+      # so this job can use the standard dsvm-irrelevant-files.
+      - ^api-.*$
+      - ^(test-|)requirements.txt$
+      - ^.*\.rst$
+      - ^.git.*$
+      - ^doc/.*$
+      - ^nova/hacking/.*$
+      - ^nova/locale/.*$
+      - ^nova/tests/(?!live_migration/).*$
+      - ^releasenotes/.*$
+      - ^setup.cfg$
+      - ^tests-py3.txt$
+      - ^tools/.*$
+      - ^tox.ini$
 
 - job:
     name: nova-lvm
@@ -164,7 +182,7 @@
       TLS console proxy code in the libvirt driver.
       Starting in Stein, the job was changed to run with python 3 and enabled
       volume multi-attach testing.
-      Runs all tempest compute API and scenario tests concurrently.
+      Runs all tempest compute API and most scenario tests concurrently.
     run: playbooks/legacy/nova-next/run.yaml
     post-run: playbooks/legacy/nova-next/post.yaml
 
@@ -193,6 +211,23 @@
     required-projects:
       - openstack/oslo.versionedobjects
 
+- job:
+    name: nova-grenade-live-migration
+    parent: nova-dsvm-multinode-base
+    description: |
+      Multi-node grenade job which runs nova/tests/live_migration/hooks tests.
+      In other words, this tests live migration with mixed-version compute
+      services which is important for things like rolling upgrade support.
+      The former name for this job was
+      "legacy-grenade-dsvm-neutron-multinode-live-migration".
+    run: playbooks/legacy/nova-grenade-live-migration/run.yaml
+    post-run: playbooks/legacy/nova-grenade-live-migration/post.yaml
+    required-projects:
+      - openstack-dev/grenade
+      - openstack-infra/devstack-gate
+      - openstack/nova
+    irrelevant-files: *live-migration-irrelevant-files
+
 - project:
     # Please try to keep the list of job names sorted alphabetically.
     templates:
@@ -203,6 +238,7 @@
       - openstack-python-jobs
       - openstack-python35-jobs
       - openstack-python36-jobs
+      - openstack-python37-jobs
       - periodic-stable-jobs
       - publish-openstack-docs-pti
       - release-notes-jobs-python3
@@ -216,26 +252,6 @@
         - devstack-plugin-ceph-tempest:
             voting: false
             irrelevant-files: *dsvm-irrelevant-files
-        # TODO(mriedem): We need to move this job definition in-tree from
-        # openstack-zuul-jobs.
-        - legacy-grenade-dsvm-neutron-multinode-live-migration:
-            voting: false
-            irrelevant-files:
-              # We define our own irrelevant-files because we need to run
-              # this if there are changes to nova/tests/live_migration/.
-              - ^api-.*$
-              - ^(test-|)requirements.txt$
-              - ^.*\.rst$
-              - ^.git.*$
-              - ^doc/.*$
-              - ^nova/hacking/.*$
-              - ^nova/locale/.*$
-              - ^nova/tests/(?!live_migration/).*$
-              - ^releasenotes/.*$
-              - ^setup.cfg$
-              - ^tests-py3.txt$
-              - ^tools/.*$
-              - ^tox.ini$
         - neutron-grenade-multinode:
             irrelevant-files: *dsvm-irrelevant-files
         - neutron-tempest-linuxbridge:
@@ -245,6 +261,7 @@
               # code; we don't need to run this on all changes, nor do we run
               # it in the gate.
               - ^(?!nova/network/.*)(?!nova/virt/libvirt/vif.py).*$
+        - nova-grenade-live-migration
         - nova-live-migration
         - nova-lvm
         - nova-next
@@ -261,6 +278,7 @@
             irrelevant-files: *dsvm-irrelevant-files
     gate:
       jobs:
+        - nova-grenade-live-migration
         - nova-live-migration
         - nova-tox-functional
         - nova-tox-functional-py35
@@ -302,7 +320,6 @@
             irrelevant-files: *dsvm-irrelevant-files
         - os-vif-ovs:
             irrelevant-files: *dsvm-irrelevant-files
-        - openstack-tox-py37
         # NOTE(mriedem): Consider moving nova-tox-functional-py36 to the
         # check and gate queues once it's stable (like openstack-python36-jobs)
         - nova-tox-functional-py36

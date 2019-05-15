@@ -21,6 +21,7 @@ import calendar
 import inspect
 import os
 import re
+import signal
 import time
 
 import netaddr
@@ -654,28 +655,12 @@ def init_host(ip_range, is_external=False):
     iptables_manager.apply()
 
 
-def send_arp_for_ip(ip, device, count):
-    out, err = _execute('arping', '-U', ip,
-                        '-A', '-I', device,
-                        '-c', str(count),
-                        run_as_root=True, check_exit_code=False)
-
-    if err:
-        LOG.debug('arping error for IP %s', ip)
-
-
 def bind_floating_ip(floating_ip, device):
     """Bind IP to public interface."""
     nova.privsep.linux_net.bind_ip(device, floating_ip)
     if CONF.send_arp_for_ha and CONF.send_arp_for_ha_count > 0:
-        send_arp_for_ip(floating_ip, device, CONF.send_arp_for_ha_count)
-
-
-def unbind_floating_ip(floating_ip, device):
-    """Unbind a public IP from public interface."""
-    _execute('ip', 'addr', 'del', str(floating_ip) + '/32',
-             'dev', device,
-             run_as_root=True, check_exit_code=[0, 2, 254])
+        nova.privsep.linux_net.send_arp_for_ip(
+            floating_ip, device, CONF.send_arp_for_ha_count)
 
 
 def ensure_metadata_ip():
@@ -750,14 +735,6 @@ def floating_forward_rules(floating_ip, fixed_ip, device):
     return rules
 
 
-def clean_conntrack(fixed_ip):
-    try:
-        _execute('conntrack', '-D', '-r', fixed_ip, run_as_root=True,
-                 check_exit_code=[0, 1])
-    except processutils.ProcessExecutionError:
-        LOG.exception('Error deleting conntrack entries for %s', fixed_ip)
-
-
 def _enable_ipv4_forwarding():
     sysctl_key = 'net.ipv4.ip_forward'
     stdout, stderr = _execute('sysctl', '-n', sysctl_key)
@@ -782,8 +759,7 @@ def initialize_gateway_device(dev, network_ref):
     full_ip = '%s/%s' % (network_ref['dhcp_server'], prefix)
     new_ip_params = [[full_ip, 'brd', network_ref['broadcast']]]
     old_ip_params = []
-    out, err = _execute('ip', 'addr', 'show', 'dev', dev,
-                        'scope', 'global')
+    out, err = nova.privsep.linux_net.lookup_ip(dev)
     for line in out.split('\n'):
         fields = line.split()
         if fields and fields[0] == 'inet':
@@ -796,15 +772,14 @@ def initialize_gateway_device(dev, network_ref):
                 new_ip_params.append(ip_params)
     if not old_ip_params or old_ip_params[0][0] != full_ip:
         old_routes = []
-        result = _execute('ip', 'route', 'show', 'dev', dev)
+        result = nova.privsep.linux_net.routes_show(dev)
         if result:
             out, err = result
             for line in out.split('\n'):
                 fields = line.split()
                 if fields and 'via' in fields:
                     old_routes.append(fields)
-                    _execute('ip', 'route', 'del', fields[0],
-                             'dev', dev, run_as_root=True)
+                    nova.privsep.linux_net.route_delete(dev, fields[0])
         for ip_params in old_ip_params:
             _execute(*_ip_bridge_cmd('del', ip_params, dev),
                      run_as_root=True, check_exit_code=[0, 2, 254])
@@ -813,15 +788,14 @@ def initialize_gateway_device(dev, network_ref):
                      run_as_root=True, check_exit_code=[0, 2, 254])
 
         for fields in old_routes:
-            _execute('ip', 'route', 'add', *fields,
-                     run_as_root=True)
+            # TODO(mikal): this is horrible and should be re-written
+            nova.privsep.linux_net.route_add_horrid(fields)
         if CONF.send_arp_for_ha and CONF.send_arp_for_ha_count > 0:
-            send_arp_for_ip(network_ref['dhcp_server'], dev,
-                            CONF.send_arp_for_ha_count)
+            nova.privsep.linux_net.send_arp_for_ip(
+                network_ref['dhcp_server'], dev,
+                CONF.send_arp_for_ha_count)
     if CONF.use_ipv6:
-        _execute('ip', '-f', 'inet6', 'addr',
-                 'change', network_ref['cidr_v6'],
-                 'dev', dev, run_as_root=True)
+        nova.privsep.linux_net.change_ip(dev, network_ref['cidr_v6'])
 
 
 def get_dhcp_leases(context, network_ref):
@@ -930,8 +904,7 @@ def get_dhcp_opts(context, network_ref, fixedips):
 def release_dhcp(dev, address, mac_address):
     if nova.privsep.linux_net.device_exists(dev):
         try:
-            utils.execute('dhcp_release', dev, address, mac_address,
-                          run_as_root=True)
+            nova.privsep.linux_net.dhcp_release(dev, address, mac_address)
         except processutils.ProcessExecutionError:
             raise exception.NetworkDhcpReleaseFailed(address=address,
                                                      mac_address=mac_address)
@@ -967,7 +940,7 @@ def kill_dhcp(dev):
         # Check that the process exists and looks like a dnsmasq process
         conffile = _dhcp_file(dev, 'conf')
         if is_pid_cmdline_correct(pid, conffile.split('/')[-1]):
-            _execute('kill', '-9', pid, run_as_root=True)
+            nova.privsep.utils.kill(pid, signal.SIGKILL)
         else:
             LOG.debug('Pid %d is stale, skip killing dnsmasq', pid)
     _remove_dnsmasq_accept_rules(dev)
@@ -1002,7 +975,7 @@ def restart_dhcp(context, dev, network_ref, fixedips):
     if pid:
         if is_pid_cmdline_correct(pid, conffile.split('/')[-1]):
             try:
-                _execute('kill', '-HUP', pid, run_as_root=True)
+                nova.privsep.utils.kill(pid, signal.SIGHUP)
                 _add_dnsmasq_accept_rules(dev)
                 return
             except Exception as exc:
@@ -1082,7 +1055,7 @@ interface %s
     if pid:
         if is_pid_cmdline_correct(pid, conffile):
             try:
-                _execute('kill', pid, run_as_root=True)
+                nova.privsep.utils.kill(pid, signal.SIGTERM)
             except Exception as exc:
                 LOG.error('killing radvd threw %s', exc)
         else:
@@ -1454,15 +1427,13 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
             # NOTE(danms): We also need to copy routes to the bridge so as
             #              not to break existing connectivity on the interface
             old_routes = []
-            out, err = _execute('ip', 'route', 'show', 'dev', interface)
+            out, err = nova.privsep.linux_net.routes_show(interface)
             for line in out.split('\n'):
                 fields = line.split()
                 if fields and 'via' in fields:
                     old_routes.append(fields)
-                    _execute('ip', 'route', 'del', *fields,
-                             run_as_root=True)
-            out, err = _execute('ip', 'addr', 'show', 'dev', interface,
-                                'scope', 'global')
+                    nova.privsep.linux_net.route_delete_horrid(fields)
+            out, err = nova.privsep.linux_net.lookup_ip(interface)
             for line in out.split('\n'):
                 fields = line.split()
                 if fields and fields[0] == 'inet':
@@ -1475,8 +1446,7 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
                     _execute(*_ip_bridge_cmd('add', params, bridge),
                              run_as_root=True, check_exit_code=[0, 2, 254])
             for fields in old_routes:
-                _execute('ip', 'route', 'add', *fields,
-                         run_as_root=True)
+                nova.privsep.linux_net.route_add_horrid(fields)
 
         if filtering:
             # Don't forward traffic unless we were told to be a gateway
@@ -1530,9 +1500,7 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
 #            ebtables while its holding a lock. As a result we want to add
 #            a timeout to the ebtables calls but we first need to teach
 #            oslo_concurrency how to do that.
-def _exec_ebtables(*cmd, **kwargs):
-    check_exit_code = kwargs.pop('check_exit_code', True)
-
+def _exec_ebtables(table, rule, insert_rule=True, check_exit_code=True):
     # List of error strings to re-try.
     retry_strings = (
         'Multiple ebtables programs',
@@ -1550,7 +1518,14 @@ def _exec_ebtables(*cmd, **kwargs):
         #            other error (like a rule doesn't exist) so we have to
         #            to parse stderr.
         try:
-            _execute(*cmd, check_exit_code=[0], **kwargs)
+            cmd = ['ebtables', '--concurrent', '-t', table]
+            if insert_rule:
+                cmd.append('-I')
+            else:
+                cmd.append('-D')
+            cmd.extend(rule)
+
+            _execute(*cmd, check_exit_code=[0], run_as_root=True)
         except processutils.ProcessExecutionError as exc:
             # See if we can retry the error.
             if any(error in exc.stderr for error in retry_strings):
@@ -1578,17 +1553,16 @@ def _exec_ebtables(*cmd, **kwargs):
 @utils.synchronized('ebtables', external=True)
 def ensure_ebtables_rules(rules, table='filter'):
     for rule in rules:
-        cmd = ['ebtables', '--concurrent', '-t', table, '-D'] + rule.split()
-        _exec_ebtables(*cmd, check_exit_code=False, run_as_root=True)
-        cmd[4] = '-I'
-        _exec_ebtables(*cmd, run_as_root=True)
+        _exec_ebtables(table, rule.split(), insert_rule=False,
+                       check_exit_code=False)
+        _exec_ebtables(table, rule.split())
 
 
 @utils.synchronized('ebtables', external=True)
 def remove_ebtables_rules(rules, table='filter'):
     for rule in rules:
-        cmd = ['ebtables', '--concurrent', '-t', table, '-D'] + rule.split()
-        _exec_ebtables(*cmd, check_exit_code=False, run_as_root=True)
+        _exec_ebtables(table, rule.split(), insert_rule=False,
+                       check_exit_code=False)
 
 
 def isolate_dhcp_address(interface, address):

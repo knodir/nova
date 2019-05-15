@@ -123,6 +123,8 @@ class Resources(object):
 
 
 class FakeDriver(driver.ComputeDriver):
+    # These must match the traits in
+    # nova.tests.functional.integrated_helpers.ProviderUsageBaseTestCase
     capabilities = {
         "has_imagecache": True,
         "supports_evacuate": True,
@@ -338,7 +340,7 @@ class FakeDriver(driver.ComputeDriver):
             self._mounts[instance_name] = {}
         self._mounts[instance_name][mountpoint] = new_connection_info
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         """Extend the disk attached to the instance."""
         pass
 
@@ -901,13 +903,13 @@ class FakeDriverWithPciResources(SmallFakeDriver):
     def get_available_resource(self, nodename):
         host_status = super(
             FakeDriverWithPciResources, self).get_available_resource(nodename)
-        # 01:00 - PF
+        # 01:00 - PF - ens1
         #  |---- 01:00.1 - VF
         #
-        # 02:00 - PF
+        # 02:00 - PF - ens2
         #  |---- 02:00.1 - VF
         #
-        # 03:00 - PF
+        # 03:00 - PF - ens3
         #  |---- 03:00.1 - VF
         host_status['pci_passthrough_devices'] = jsonutils.dumps([
             {
@@ -929,6 +931,7 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'parent_addr': '0000:01:00',
                 'numa_node': 0,
                 'label': 'fake-label',
+                "parent_ifname": "ens1",
             },
             {
                 'address': '0000:02:00.0',
@@ -949,6 +952,7 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'parent_addr': '0000:02:00',
                 'numa_node': 0,
                 'label': 'fake-label',
+                "parent_ifname": "ens2",
             },
             {
                 'address': '0000:03:00.0',
@@ -969,6 +973,7 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'parent_addr': '0000:03:00',
                 'numa_node': 0,
                 'label': 'fake-label',
+                "parent_ifname": "ens3",
             },
         ])
         return host_status

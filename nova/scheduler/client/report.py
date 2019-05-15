@@ -400,6 +400,27 @@ class SchedulerReportClient(object):
              'status_code': resp.status_code, 'err_text': resp.text})
         raise exception.ResourceProviderTraitRetrievalFailed(uuid=rp_uuid)
 
+    def get_resource_provider_name(self, context, uuid):
+        """Return the name of a RP. It tries to use the internal of RPs or
+        falls back to calling placement directly.
+
+        :param context: The security context
+        :param uuid: UUID identifier for the resource provider to look up
+        :return: The name of the RP
+        :raise: ResourceProviderRetrievalFailed if the RP is not in the cache
+            and the communication with the placement is failed.
+        :raise: ResourceProviderNotFound if the RP does not exists.
+        """
+
+        try:
+            return self._provider_tree.data(uuid).name
+        except ValueError:
+            rsp = self._get_resource_provider(context, uuid)
+            if rsp is None:
+                raise exception.ResourceProviderNotFound(name_or_uuid=uuid)
+            else:
+                return rsp['name']
+
     @safe_connect
     def _get_resource_provider(self, context, uuid):
         """Queries the placement API for a resource provider record with the
@@ -1828,12 +1849,17 @@ class SchedulerReportClient(object):
         piece of allocation from source to target then this function might not
         be what you want as it always moves what source has in Placement.
 
+        If the target consumer has allocations but the source consumer does
+        not, this method assumes the allocations were already moved and
+        returns True.
+
         :param context: The security context
         :param source_consumer_uuid: the UUID of the consumer from which
                                      allocations are moving
         :param target_consumer_uuid: the UUID of the target consumer for the
                                      allocations
-        :returns: True if the move was successful False otherwise.
+        :returns: True if the move was successful (or already done),
+                  False otherwise.
         :raises AllocationMoveFailed: If the source or the target consumer has
                                       been modified while this call tries to
                                       move allocations.
@@ -1844,6 +1870,13 @@ class SchedulerReportClient(object):
             context, target_consumer_uuid)
 
         if target_alloc and target_alloc['allocations']:
+            # Check to see if the source allocations still exist because if
+            # they don't they might have already been moved to the target.
+            if not (source_alloc and source_alloc['allocations']):
+                LOG.info('Allocations not found for consumer %s; assuming '
+                         'they were already moved to consumer %s',
+                         source_consumer_uuid, target_consumer_uuid)
+                return True
             LOG.warning('Overwriting current allocation %(allocation)s on '
                         'consumer %(consumer)s',
                         {'allocation': target_alloc,
@@ -1952,12 +1985,15 @@ class SchedulerReportClient(object):
         return r.status_code == 204
 
     @safe_connect
-    def delete_allocation_for_instance(self, context, uuid):
+    def delete_allocation_for_instance(self, context, uuid,
+                                       consumer_type='instance'):
         """Delete the instance allocation from placement
 
         :param context: The security context
-        :param uuid: the instance UUID which will be used as the consumer UUID
-                     towards placement
+        :param uuid: the instance or migration UUID which will be used
+                     as the consumer UUID towards placement
+        :param consumer_type: The type of the consumer specified by uuid.
+                              'instance' or 'migration' (Default: instance)
         :return: Returns True if the allocation is successfully deleted by this
                  call. Returns False if the allocation does not exist.
         :raises AllocationDeleteFailed: If the allocation cannot be read from
@@ -1980,9 +2016,10 @@ class SchedulerReportClient(object):
         if not r:
             # at the moment there is no way placement returns a failure so we
             # could even delete this code
-            LOG.warning('Unable to delete allocation for instance '
+            LOG.warning('Unable to delete allocation for %(consumer_type)s '
                         '%(uuid)s: (%(code)i %(text)s)',
-                        {'uuid': uuid,
+                        {'consumer_type': consumer_type,
+                         'uuid': uuid,
                          'code': r.status_code,
                          'text': r.text})
             raise exception.AllocationDeleteFailed(consumer_uuid=uuid,
@@ -2000,12 +2037,15 @@ class SchedulerReportClient(object):
         r = self.put(url, allocations, global_request_id=context.global_id,
                      version=CONSUMER_GENERATION_VERSION)
         if r.status_code == 204:
-            LOG.info('Deleted allocation for instance %s', uuid)
+            LOG.info('Deleted allocation for %(consumer_type)s %(uuid)s',
+                     {'consumer_type': consumer_type,
+                      'uuid': uuid})
             return True
         else:
-            LOG.warning('Unable to delete allocation for instance '
+            LOG.warning('Unable to delete allocation for %(consumer_type)s '
                         '%(uuid)s: (%(code)i %(text)s)',
-                        {'uuid': uuid,
+                        {'consumer_type': consumer_type,
+                         'uuid': uuid,
                          'code': r.status_code,
                          'text': r.text})
             raise exception.AllocationDeleteFailed(consumer_uuid=uuid,

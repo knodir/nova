@@ -14,6 +14,7 @@
 #    under the License.
 
 import base64
+import errno
 import os
 import shutil
 import tempfile
@@ -696,7 +697,7 @@ class LvmTestCase(_ImageTestCase, test.NoDBTestCase):
         mock_get.assert_called_once_with(self.TEMPLATE_PATH)
         path = '/dev/%s/%s_%s' % (self.VG, self.INSTANCE.uuid, self.NAME)
         mock_convert_image.assert_called_once_with(
-            self.TEMPLATE_PATH, path, None, 'raw', CONF.instances_path)
+            self.TEMPLATE_PATH, path, None, 'raw', CONF.instances_path, False)
         mock_disk_op_sema.__enter__.assert_called_once()
 
     @mock.patch.object(imagebackend.lvm, 'create_volume')
@@ -731,7 +732,7 @@ class LvmTestCase(_ImageTestCase, test.NoDBTestCase):
         mock_get.assert_called_once_with(self.TEMPLATE_PATH)
         mock_convert_image.assert_called_once_with(
             self.TEMPLATE_PATH, self.PATH, None, 'raw',
-            CONF.instances_path)
+            CONF.instances_path, False)
         mock_disk_op_sema.__enter__.assert_called_once()
         mock_resize.assert_called_once_with(self.PATH, run_as_root=True)
 
@@ -973,7 +974,7 @@ class EncryptedLvmTestCase(_ImageTestCase, test.NoDBTestCase):
                 self.KEY)
             nova.privsep.qemu.convert_image.assert_called_with(
                 self.TEMPLATE_PATH, self.PATH, None, 'raw',
-                CONF.instances_path)
+                CONF.instances_path, False)
 
     def _create_image_generated(self, sparse):
         with test.nested(
@@ -1052,7 +1053,7 @@ class EncryptedLvmTestCase(_ImageTestCase, test.NoDBTestCase):
                  self.KEY)
             nova.privsep.qemu.convert_image.assert_called_with(
                 self.TEMPLATE_PATH, self.PATH, None, 'raw',
-                CONF.instances_path)
+                CONF.instances_path, False)
             self.disk.resize2fs.assert_called_with(self.PATH, run_as_root=True)
 
     def test_create_image(self):
@@ -1843,3 +1844,44 @@ class BackendTestCase(test.NoDBTestCase):
 
     def test_image_default(self):
         self._test_image('default', imagebackend.Flat, imagebackend.Qcow2)
+
+
+class UtimeWorkaroundTestCase(test.NoDBTestCase):
+    ERROR_STUB = "sentinel.path: [Errno 13] Permission Denied"
+
+    def setUp(self):
+        super(UtimeWorkaroundTestCase, self).setUp()
+        self.mock_utime = self.useFixture(
+                fixtures.MockPatch('nova.privsep.path.utime')).mock
+
+    def test_update_utime_no_error(self):
+        # If utime doesn't raise an error we shouldn't raise or log anything
+        imagebackend._update_utime_ignore_eacces(mock.sentinel.path)
+        self.mock_utime.assert_called_once_with(mock.sentinel.path)
+        self.assertNotIn(self.ERROR_STUB, self.stdlog.logger.output)
+
+    def test_update_utime_eacces(self):
+        # If utime raises EACCES we should log the error, but ignore it
+        e = OSError()
+        e.errno = errno.EACCES
+        e.strerror = "Permission Denied"
+        self.mock_utime.side_effect = e
+
+        imagebackend._update_utime_ignore_eacces(mock.sentinel.path)
+        self.mock_utime.assert_called_once_with(mock.sentinel.path)
+        self.assertIn(self.ERROR_STUB, self.stdlog.logger.output)
+
+    def test_update_utime_eio(self):
+        # If utime raises any other error we should raise it
+        e = OSError()
+        e.errno = errno.EIO
+        e.strerror = "IO Error"
+        self.mock_utime.side_effect = e
+
+        ex = self.assertRaises(
+            OSError, imagebackend._update_utime_ignore_eacces,
+            mock.sentinel.path)
+        self.assertIs(ex, e)
+
+        self.mock_utime.assert_called_once_with(mock.sentinel.path)
+        self.assertNotIn(self.ERROR_STUB, self.stdlog.logger.output)

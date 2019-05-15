@@ -19,9 +19,11 @@ Provides common functionality for integrated unit tests
 
 import collections
 import random
+import six
 import string
 import time
 
+import os_traits
 from oslo_log import log as logging
 from oslo_utils.fixture import uuidsentinel as uuids
 
@@ -38,6 +40,7 @@ from nova.tests.unit import cast_as_call
 from nova.tests.unit import fake_notifier
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
+from nova import utils
 from nova.virt import fake
 
 
@@ -353,14 +356,6 @@ class InstanceHelperMixin(object):
         self.fail('Timed out waiting for migration with status "%s" for '
                   'instance: %s' % (expected_statuses, server['id']))
 
-    def _wait_for_port_unbind(self, neutron, port_id, retries=10):
-        for attempt in range(retries):
-            port = neutron.show_port(port_id)['port']
-            if port['binding:host_id'] is None:
-                return port
-            time.sleep(0.5)
-        self.fail('Timed out waiting for port %s to be unbound' % port_id)
-
 
 class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
     """Base test class for functional tests that check provider usage
@@ -374,6 +369,32 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
     """
 
     microversion = 'latest'
+
+    # These must match the capabilities in
+    # nova.virt.libvirt.driver.LibvirtDriver.capabilities
+    expected_libvirt_driver_capability_traits = set([
+        six.u(trait) for trait in [
+            os_traits.COMPUTE_DEVICE_TAGGING,
+            os_traits.COMPUTE_NET_ATTACH_INTERFACE,
+            os_traits.COMPUTE_NET_ATTACH_INTERFACE_WITH_TAG,
+            os_traits.COMPUTE_VOLUME_ATTACH_WITH_TAG,
+            os_traits.COMPUTE_VOLUME_EXTEND,
+            os_traits.COMPUTE_TRUSTED_CERTS,
+        ]
+    ])
+
+    # These must match the capabilities in
+    # nova.virt.fake.FakeDriver.capabilities
+    expected_fake_driver_capability_traits = set([
+        six.u(trait) for trait in [
+            os_traits.COMPUTE_NET_ATTACH_INTERFACE,
+            os_traits.COMPUTE_NET_ATTACH_INTERFACE_WITH_TAG,
+            os_traits.COMPUTE_VOLUME_ATTACH_WITH_TAG,
+            os_traits.COMPUTE_VOLUME_EXTEND,
+            os_traits.COMPUTE_VOLUME_MULTI_ATTACH,
+            os_traits.COMPUTE_TRUSTED_CERTS,
+        ]
+    ])
 
     def setUp(self):
         self.flags(compute_driver=self.compute_driver)
@@ -445,6 +466,9 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
 
     def _create_trait(self, trait):
         return self.placement_api.put('/traits/%s' % trait, {}, version='1.6')
+
+    def _delete_trait(self, trait):
+        return self.placement_api.delete('/traits/%s' % trait, version='1.6')
 
     def _get_provider_traits(self, provider_uuid):
         return self.placement_api.get(
@@ -691,8 +715,25 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
     def _delete_and_check_allocations(self, server):
         """Delete the instance and asserts that the allocations are cleaned
 
+        If the server was moved (resized or live migrated), also checks that
+        migration-based allocations are also cleaned up.
+
         :param server: The API representation of the instance to be deleted
         """
+
+        # First check to see if there is a related migration record so we can
+        # assert its allocations (if any) are not leaked.
+        with utils.temporary_mutation(self.admin_api, microversion='2.59'):
+            migrations = self.admin_api.api_get(
+                '/os-migrations?instance_uuid=%s' %
+                server['id']).body['migrations']
+        if migrations:
+            # If there is more than one migration, they are sorted by
+            # created_at in descending order so we'll get the last one
+            # which is probably what we'd always want anyway.
+            migration_uuid = migrations[0]['uuid']
+        else:
+            migration_uuid = None
 
         self.api.delete_server(server['id'])
         self._wait_until_deleted(server)
@@ -713,6 +754,11 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
         # and no allocations for the deleted server
         allocations = self._get_allocations_by_server_uuid(server['id'])
         self.assertEqual(0, len(allocations))
+
+        if migration_uuid:
+            # and no allocations for the delete migration
+            allocations = self._get_allocations_by_server_uuid(migration_uuid)
+            self.assertEqual(0, len(allocations))
 
     def _run_periodics(self):
         """Run the update_available_resource task on every compute manager

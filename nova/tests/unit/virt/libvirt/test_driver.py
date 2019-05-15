@@ -698,9 +698,6 @@ class CacheConcurrencyTestCase(test.NoDBTestCase):
                       lambda *a, **kw: None)
         self.stub_out('nova.virt.disk.api.extend',
                       lambda image, size, use_cow=False: None)
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.imagebackend.libvirt_utils',
-            fake_libvirt_utils))
 
     def _fake_instance(self, uuid):
         return objects.Instance(id=1, uuid=uuid)
@@ -7375,8 +7372,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         snp_name = 'snapshot_name'
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         ret = drvr._create_snapshot_metadata(base, instance, img_fmt, snp_name)
-        expected = {'is_public': False,
-                    'status': 'active',
+        expected = {'status': 'active',
                     'name': snp_name,
                     'properties': {
                                    'kernel_id': instance['kernel_id'],
@@ -7964,9 +7960,11 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
         for state in (power_state.RUNNING, power_state.PAUSED):
             guest.get_power_state = mock.Mock(return_value=state)
-            drvr.extend_volume(connection_info, instance)
+            drvr.extend_volume(connection_info,
+                               instance, new_size_in_kb * 1024)
             drvr._extend_volume.assert_called_with(connection_info,
-                                                   instance)
+                                                   instance,
+                                                   new_size_in_kb * 1024)
             guest.get_block_device.assert_called_with('/fake')
             block_device.resize.assert_called_with(20480)
 
@@ -7979,7 +7977,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             connection_info = {'driver_volume_type': 'fake'}
             self.assertRaises(exception.ExtendVolumeNotSupported,
                               drvr.extend_volume,
-                              connection_info, instance)
+                              connection_info, instance, 0)
 
     def test_extend_volume_disk_not_found(self):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
@@ -7998,7 +7996,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         drvr._host.get_guest = mock.Mock(return_value=guest)
         drvr._extend_volume = mock.Mock(return_value=new_size_in_kb)
 
-        drvr.extend_volume(connection_info, instance)
+        drvr.extend_volume(connection_info, instance, new_size_in_kb * 1024)
 
     def test_extend_volume_with_instance_not_found(self):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
@@ -8013,7 +8011,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             connection_info = {'driver_volume_type': 'fake'}
             self.assertRaises(exception.InstanceNotFound,
                               drvr.extend_volume,
-                              connection_info, instance)
+                              connection_info, instance, 0)
 
     def test_extend_volume_with_libvirt_error(self):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
@@ -8038,7 +8036,80 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
         self.assertRaises(fakelibvirt.libvirtError,
                           drvr.extend_volume,
-                          connection_info, instance)
+                          connection_info, instance, new_size_in_kb * 1024)
+
+    def test_extend_volume_with_no_device_path_attribute(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        instance = objects.Instance(**self.test_instance)
+        connection_info = {
+            'serial': '58a84f6d-3f0c-4e19-a0af-eb657b790657',
+            'driver_volume_type': 'fake',
+            'data': {'cluster_name': 'fake',
+                     'auth_enabled': False,
+                     'volume_id': '58a84f6d-3f0c-4e19-a0af-eb657b790657',
+                     'access_mode': 'rw'}
+        }
+        new_size_in_kb = 20 * 1024 * 1024
+
+        guest = mock.Mock(spec='nova.virt.libvirt.guest.Guest')
+        # block_device
+        block_device = mock.Mock(
+            spec='nova.virt.libvirt.guest.BlockDevice')
+        block_device.resize = mock.Mock()
+        disk = mock.Mock(
+            spec='nova.virt.libvirt.config.LibvirtConfigGuestDisk',
+            serial='58a84f6d-3f0c-4e19-a0af-eb657b790657',
+            target_dev='vdb')
+        guest.get_block_device = mock.Mock(return_value=block_device)
+        guest.get_all_disks = mock.Mock(return_value=[disk])
+        drvr._host.get_guest = mock.Mock(return_value=guest)
+        drvr._extend_volume = mock.Mock(return_value=new_size_in_kb)
+
+        for state in (power_state.RUNNING, power_state.PAUSED):
+            guest.get_power_state = mock.Mock(return_value=state)
+            drvr.extend_volume(connection_info, instance,
+                               new_size_in_kb * 1024)
+            drvr._extend_volume.assert_called_with(connection_info,
+                                                   instance,
+                                                   new_size_in_kb * 1024)
+            guest.get_block_device.assert_called_with('vdb')
+            block_device.resize.assert_called_with(20480)
+
+    def test_extend_volume_no_disk_found_by_serial(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        instance = objects.Instance(**self.test_instance)
+        connection_info = {
+            'serial': '58a84f6d-3f0c-4e19-a0af-eb657b790657',
+            'driver_volume_type': 'fake',
+            'data': {'cluster_name': 'fake',
+                     'auth_enabled': False,
+                     'volume_id': '58a84f6d-3f0c-4e19-a0af-eb657b790657',
+                     'access_mode': 'rw'}
+        }
+        new_size_in_kb = 20 * 1024 * 1024
+
+        guest = mock.Mock(spec='nova.virt.libvirt.guest.Guest')
+        # block_device
+        block_device = mock.Mock(
+            spec='nova.virt.libvirt.guest.BlockDevice')
+        block_device.resize = mock.Mock()
+        disk = mock.Mock(
+            spec='nova.virt.libvirt.config.LibvirtConfigGuestDisk',
+            serial='12345678-abcd-abcd-abcd-0123456789012',
+            target_dev='vdb')
+        guest.get_block_device = mock.Mock(return_value=block_device)
+        guest.get_all_disks = mock.Mock(return_value=[disk])
+        drvr._host.get_guest = mock.Mock(return_value=guest)
+        drvr._extend_volume = mock.Mock(return_value=new_size_in_kb)
+        guest.get_power_state = mock.Mock(return_value=power_state.RUNNING)
+
+        self.assertRaises(
+            exception.VolumeNotFound,
+            drvr.extend_volume,
+            connection_info,
+            instance,
+            new_size_in_kb * 1024
+        )
 
     @mock.patch('os_brick.encryptors.get_encryption_metadata')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_volume_encryptor')
@@ -15032,7 +15103,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             mock_get_net_name.called_once_with(parent_address)
             mock_dev_lookup.called_once_with(dev_name)
 
-    def test_get_pcidev_info(self):
+    @mock.patch.object(pci_utils, 'get_ifname_by_pci_address',
+                return_value='ens1')
+    def test_get_pcidev_info(self, mock_get_ifname):
         self.stub_out('nova.virt.libvirt.host.Host.device_lookup_by_name',
                       lambda self, name: FakeNodeDevice(
                           _fake_NodeDevXml[name]))
@@ -15061,6 +15134,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             "label": 'label_8086_1520',
             "dev_type": fields.PciDeviceType.SRIOV_VF,
             "parent_addr": '0000:04:00.3',
+            "parent_ifname": "ens1",
             }
         self.assertEqual(expect_vf, actualvf)
 
@@ -15079,6 +15153,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 "capabilities": {
                     "network": ["rx", "tx", "sg", "tso", "gso", "gro",
                                 "rxvlan", "txvlan"]},
+                "parent_ifname": "ens1",
                 }
             self.assertEqual(expect_vf, actualvf)
 
@@ -15147,10 +15222,12 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             self.assertRaises(fakelibvirt.libvirtError,
                               drvr._get_pci_passthrough_devices)
 
+    @mock.patch.object(pci_utils, 'get_ifname_by_pci_address',
+                return_value='ens1')
     @mock.patch.object(host.Host, 'list_pci_devices',
                        return_value=['pci_0000_04_00_3', 'pci_0000_04_10_7',
                                      'pci_0000_04_11_7'])
-    def test_get_pci_passthrough_devices(self, mock_list):
+    def test_get_pci_passthrough_devices(self, mock_list, mock_get_ifname):
         self.stub_out('nova.virt.libvirt.host.Host.device_lookup_by_name',
                       lambda self, name: FakeNodeDevice(
                           _fake_NodeDevXml[name]))
@@ -15176,7 +15253,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 "numa_node": None,
                 "dev_type": fields.PciDeviceType.SRIOV_VF,
                 "phys_function": [('0x0000', '0x04', '0x00', '0x3')],
-                "parent_addr": "0000:04:00.3"},
+                "parent_addr": "0000:04:00.3",
+                "parent_ifname": "ens1",
+            },
             {
                 "dev_id": "pci_0000_04_11_7",
                 "domain": 0,
@@ -15186,7 +15265,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 "numa_node": 0,
                 "dev_type": fields.PciDeviceType.SRIOV_VF,
                 "phys_function": [('0x0000', '0x04', '0x00', '0x3')],
-                "parent_addr": "0000:04:00.3"
+                "parent_addr": "0000:04:00.3",
+                "parent_ifname": "ens1",
             }
         ]
 
@@ -15196,6 +15276,15 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 if key not in ['phys_function', 'virt_functions', 'label']:
                     self.assertEqual(expectvfs[dev][key], actualvfs[dev][key])
         mock_list.assert_called_once_with()
+
+        # The first call for every VF is to determine parent_ifname and
+        # the second call to determine the MAC address.
+        mock_get_ifname.assert_has_calls([
+            mock.call('0000:04:10.7', pf_interface=True),
+            mock.call('0000:04:10.7', False),
+            mock.call('0000:04:11.7', pf_interface=True),
+            mock.call('0000:04:11.7', False)
+        ])
 
     # TODO(stephenfin): This only has one caller. Flatten it and remove the
     # 'mempages=False' branches or add the missing test
@@ -15983,6 +16072,14 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             guest = vconfig.LibvirtConfigGuest()
             guest.ostype = 'hvm'
             guest.arch = fields.Architecture.I686
+            guest.domtype = ['kvm']
+            caps.guests.append(guest)
+
+            # Include one that is not known to nova to make sure it
+            # does not trip us up.
+            guest = vconfig.LibvirtConfigGuest()
+            guest.ostype = 'hvm'
+            guest.arch = 'itanic'
             guest.domtype = ['kvm']
             caps.guests.append(guest)
 
@@ -18008,9 +18105,6 @@ class HostStateTestCase(test.NoDBTestCase):
         def _get_vcpu_used(self):
             return 0
 
-        def _get_vgpu_total(self):
-            return 0
-
         def _get_cpu_info(self):
             return HostStateTestCase.cpu_info
 
@@ -18139,7 +18233,7 @@ class TestUpdateProviderTree(test.NoDBTestCase):
 
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_cpu_traits',
                 new=mock.Mock(return_value=cpu_traits))
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vgpu_total')
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
                 return_value={'total': disk_gb})
     @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
@@ -18147,8 +18241,10 @@ class TestUpdateProviderTree(test.NoDBTestCase):
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_total',
                 return_value=vcpus)
     def _test_update_provider_tree(self, mock_vcpu, mock_mem, mock_disk,
-                                   mock_vgpus, total_vgpus=0):
-        mock_vgpus.return_value = total_vgpus
+                                   mock_gpu_invs, gpu_invs=None):
+        if gpu_invs:
+            self.flags(enabled_vgpu_types=['nvidia-11'], group='devices')
+            mock_gpu_invs.return_value = gpu_invs
         self.driver.update_provider_tree(self.pt,
                                          self.cn_rp['name'])
 
@@ -18160,18 +18256,58 @@ class TestUpdateProviderTree(test.NoDBTestCase):
                          self.pt.data(self.cn_rp['uuid']).traits)
 
     def test_update_provider_tree_with_vgpus(self):
-        self._test_update_provider_tree(total_vgpus=8)
+        pci_devices = ['pci_0000_06_00_0', 'pci_0000_07_00_0']
+        gpu_inventory_dicts = {
+            pci_devices[0]: {'total': 16,
+                             'max_unit': 16,
+                             'min_unit': 1,
+                             'step_size': 1,
+                             'reserved': 0,
+                             'allocation_ratio': 1.0,
+                             },
+            pci_devices[1]: {'total': 8,
+                             'max_unit': 8,
+                             'min_unit': 1,
+                             'step_size': 1,
+                             'reserved': 0,
+                             'allocation_ratio': 1.0,
+                             },
+        }
+        self._test_update_provider_tree(gpu_invs=gpu_inventory_dicts)
         inventory = self._get_inventory()
-        # Add VGPU in the expected inventory
-        inventory[orc.VGPU] = {'step_size': 1,
-                               'min_unit': 1,
-                               'max_unit': 8,
-                               'total': 8}
+        # root compute node provider inventory is unchanged
         self.assertEqual(inventory,
                          (self.pt.data(self.cn_rp['uuid'])).inventory)
+        # We should have two new pGPU child providers in the tree under the
+        # compute node root provider.
+        compute_node_tree_uuids = self.pt.get_provider_uuids(
+            self.cn_rp['name'])
+        self.assertEqual(3, len(compute_node_tree_uuids))
+        # Create a default GPU inventory with no total and max_unit amounts yet
+        default_gpu_inventory = {
+            orc.VGPU: {
+                'step_size': 1, 'min_unit': 1, 'reserved': 0,
+                'allocation_ratio': 1.0
+            }
+        }
+        # The pGPU child providers should be any item in the list but the first
+        # which is the root provider UUID
+        for rp_uuid in compute_node_tree_uuids[1:]:
+            pgpu_provider_data = self.pt.data(rp_uuid)
+            # Identify which PCI device is related to this Resource Provider
+            pci_device = (pci_devices[0]
+                          if pci_devices[0] in pgpu_provider_data.name
+                          else pci_devices[1])
+            self.assertEqual('%s_%s' % (self.cn_rp['name'], pci_device),
+                             pgpu_provider_data.name)
+            pgpu_inventory = default_gpu_inventory.copy()
+            inventory_dict = gpu_inventory_dicts[pci_device]
+            pgpu_inventory[orc.VGPU][
+                'total'] = inventory_dict['total']
+            pgpu_inventory[orc.VGPU][
+                'max_unit'] = inventory_dict['max_unit']
+            self.assertEqual(pgpu_inventory, pgpu_provider_data.inventory)
 
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vgpu_total',
-                return_value=0)
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
                 return_value={'total': disk_gb})
     @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
@@ -18181,7 +18317,7 @@ class TestUpdateProviderTree(test.NoDBTestCase):
     # TODO(efried): Bug #1784020
     @unittest.expectedFailure
     def test_update_provider_tree_for_shared_disk_gb_resource(
-        self, mock_vcpu, mock_mem, mock_disk, mock_vgpus):
+        self, mock_vcpu, mock_mem, mock_disk):
         """Test to check DISK_GB is reported from shared resource
         provider.
         """
@@ -18228,6 +18364,207 @@ class TestUpdateProviderTree(test.NoDBTestCase):
         self._test_update_provider_tree()
         self.assertEqual(set(['HW_CPU_X86_AVX512F', 'HW_CPU_X86_BMI']),
                          self.pt.data(self.cn_rp['uuid']).traits)
+
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_cpu_traits',
+                new=mock.Mock(return_value=cpu_traits))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
+                '_get_mediated_device_information')
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
+                '_get_all_assigned_mediated_devices')
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
+                return_value={'total': disk_gb})
+    @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
+                return_value=memory_mb)
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_total',
+                return_value=vcpus)
+    def test_update_provider_tree_for_vgpu_reshape(
+            self, mock_vcpu, mock_mem, mock_disk, mock_gpus, mock_get_devs,
+            mock_get_mdev_info):
+        """Tests the VGPU reshape scenario."""
+        self.flags(enabled_vgpu_types=['nvidia-11'], group='devices')
+        # Let's assume we have two PCI devices each having 4 pGPUs for this
+        # type
+        pci_devices = ['pci_0000_06_00_0', 'pci_0000_07_00_0']
+        gpu_inventory_dicts = {
+            pci_devices[0]: {'total': 4,
+                             'max_unit': 4,
+                             'min_unit': 1,
+                             'step_size': 1,
+                             'reserved': 0,
+                             'allocation_ratio': 1.0,
+                             },
+            pci_devices[1]: {'total': 4,
+                             'max_unit': 4,
+                             'min_unit': 1,
+                             'step_size': 1,
+                             'reserved': 0,
+                             'allocation_ratio': 1.0,
+                             },
+        }
+        mock_gpus.return_value = gpu_inventory_dicts
+        # Fake the fact that we have one vGPU allocated to one instance and
+        # this vGPU is on the first PCI device
+        mock_get_devs.return_value = {uuids.mdev1: uuids.consumer1}
+        mock_get_mdev_info.side_effect = [
+            {"dev_id": "mdev_fake",
+             "uuid": uuids.mdev1,
+             "parent": pci_devices[0],
+             "type": "nvidia-11",
+             "iommu_group": 12
+             }]
+        # First create a provider tree with VGPU inventory on the root node
+        # provider. Since we have 2 devices with 4 pGPUs each, the total is 8
+        # as we were flattening all resources in one single inventory before
+        inventory = self._get_inventory()
+        vgpu_inventory = {
+            orc.VGPU: {
+                'step_size': 1, 'min_unit': 1, 'max_unit': 8, 'total': 8
+            }
+        }
+        inventory.update(vgpu_inventory)
+        self.pt.update_inventory(self.cn_rp['uuid'], inventory)
+        # Call update_provider_tree which will raise ReshapeNeeded because
+        # there is VGPU inventory on the root node provider.
+        self.assertRaises(exception.ReshapeNeeded,
+                          self.driver.update_provider_tree,
+                          self.pt, self.cn_rp['name'])
+        # Now make up some fake allocations to pass back to the upt method
+        # for the reshape.
+        allocations = {
+            uuids.consumer1: {
+                'allocations': {
+                    # This consumer has ram and vgpu allocations on the root
+                    # node provider and should be changed.
+                    self.cn_rp['uuid']: {
+                        'resources': {
+                            orc.MEMORY_MB: 512,
+                            orc.VGPU: 1
+                        }
+                    }
+                }
+            },
+            uuids.consumer2: {
+                'allocations': {
+                    # This consumer has ram and vcpu allocations on the root
+                    # node provider and should not be changed.
+                    self.cn_rp['uuid']: {
+                        'resources': {
+                            orc.MEMORY_MB: 256,
+                            orc.VCPU: 2
+                        }
+                    }
+                }
+            }
+        }
+        original_allocations = copy.deepcopy(allocations)
+        # Initiate the reshape.
+        self.driver.update_provider_tree(
+            self.pt, self.cn_rp['name'], allocations=allocations)
+        # We should have two new VGPU child providers in the tree under the
+        # compute node root provider.
+        compute_node_tree_uuids = self.pt.get_provider_uuids(
+            self.cn_rp['name'])
+        self.assertEqual(3, len(compute_node_tree_uuids))
+        rp_per_pci_device = {}
+        # The VGPU child providers should be the 2nd and 3rd UUIDs in that list
+        for rp_uuid in compute_node_tree_uuids[1:]:
+            # The VGPU inventory should be on the VGPU child provider
+            pgpu_provider_data = self.pt.data(rp_uuid)
+            # We want to map the PCI device with the RP UUID
+            if pci_devices[0] in pgpu_provider_data.name:
+                rp_per_pci_device[pci_devices[0]] = rp_uuid
+            elif pci_devices[1] in pgpu_provider_data.name:
+                rp_per_pci_device[pci_devices[1]] = rp_uuid
+        # Make sure we have two child resource providers
+        self.assertEqual(2, len(rp_per_pci_device))
+
+        # The compute node root provider should not have VGPU inventory.
+        del inventory[orc.VGPU]
+        self.assertEqual(inventory, self.pt.data(self.cn_rp['uuid']).inventory)
+        # consumer1 should now have allocations against two providers,
+        # MEMORY_MB on the root compute node provider and VGPU on the child
+        # provider.
+        consumer1_allocs = allocations[uuids.consumer1]['allocations']
+        self.assertEqual(2, len(consumer1_allocs))
+        self.assertEqual({orc.MEMORY_MB: 512},
+                         consumer1_allocs[self.cn_rp['uuid']]['resources'])
+        # Make sure the VGPU allocation moved to the corresponding child RP
+        self.assertEqual(
+            {orc.VGPU: 1},
+            consumer1_allocs[rp_per_pci_device[pci_devices[0]]]['resources'])
+        # The allocations on consumer2 should be unchanged.
+        self.assertEqual(original_allocations[uuids.consumer2],
+                         allocations[uuids.consumer2])
+
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_cpu_traits',
+                new=mock.Mock(return_value=cpu_traits))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
+                return_value={'total': disk_gb})
+    @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
+                return_value=memory_mb)
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_total',
+                return_value=vcpus)
+    def test_update_provider_tree_for_vgpu_reshape_fails(
+            self, mock_vcpu, mock_mem, mock_disk, mock_gpus):
+        """Tests the VGPU reshape failure scenario where VGPU allocations
+        are not on the root compute node provider as expected.
+        """
+        self.flags(enabled_vgpu_types=['nvidia-11'], group='devices')
+        # Let's assume we have two PCI devices each having 4 pGPUs for this
+        # type
+        pci_devices = ['pci_0000_06_00_0', 'pci_0000_07_00_0']
+        gpu_inventory_dicts = {
+            pci_devices[0]: {'total': 4,
+                             'max_unit': 4,
+                             'min_unit': 1,
+                             'step_size': 1,
+                             'reserved': 0,
+                             'allocation_ratio': 1.0,
+                             },
+            pci_devices[1]: {'total': 4,
+                             'max_unit': 4,
+                             'min_unit': 1,
+                             'step_size': 1,
+                             'reserved': 0,
+                             'allocation_ratio': 1.0,
+                             },
+        }
+        mock_gpus.return_value = gpu_inventory_dicts
+        # First create a provider tree with VGPU inventory on the root node
+        # provider.
+        inventory = self._get_inventory()
+        vgpu_inventory = {
+            orc.VGPU: {
+                'step_size': 1, 'min_unit': 1, 'max_unit': 8, 'total': 8
+            }
+        }
+        inventory.update(vgpu_inventory)
+        self.pt.update_inventory(self.cn_rp['uuid'], inventory)
+        # Now make up some fake allocations to pass back to the upt method
+        # for the reshape.
+        allocations = {
+            uuids.consumer1: {
+                'allocations': {
+                    # This consumer has invalid VGPU allocations on a non-root
+                    # compute node provider.
+                    uuids.other_rp: {
+                        'resources': {
+                            orc.MEMORY_MB: 512,
+                            orc.VGPU: 1
+                        }
+                    }
+                }
+            }
+        }
+        # Initiate the reshape.
+        ex = self.assertRaises(exception.ReshapeFailed,
+                               self.driver.update_provider_tree,
+                               self.pt, self.cn_rp['name'],
+                               allocations=allocations)
+        self.assertIn('Unexpected VGPU resource allocation on provider %s'
+                      % uuids.other_rp, six.text_type(ex))
 
 
 class TraitsComparisonMixin(object):
@@ -18730,18 +19067,40 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
                                                   'uuid': 'other_uuid'})
 
     @mock.patch.object(compute_utils, 'disk_ops_semaphore')
+    @mock.patch('nova.privsep.utils.supports_direct_io', return_value=True)
     @mock.patch('oslo_concurrency.processutils.execute')
     @mock.patch('os.rename')
-    def test_disk_raw_to_qcow2(self, mock_rename, mock_execute,
+    def test_disk_raw_to_qcow2(self, mock_rename, mock_execute, mock_direct_io,
                                mock_disk_op_sema):
         path = '/test/disk'
         _path_qcow = path + '_qcow'
 
         self.drvr._disk_raw_to_qcow2(path)
         mock_disk_op_sema.__enter__.assert_called_once()
+        mock_direct_io.assert_called_once_with(CONF.instances_path)
         mock_execute.assert_has_calls([
-            mock.call('qemu-img', 'convert', '-f', 'raw',
-                      '-O', 'qcow2', path, _path_qcow)])
+            mock.call('qemu-img', 'convert', '-t', 'none',
+                      '-O', 'qcow2', '-f', 'raw', path, _path_qcow)])
+        mock_rename.assert_has_calls([
+            mock.call(_path_qcow, path)])
+
+    @mock.patch.object(compute_utils, 'disk_ops_semaphore')
+    @mock.patch('nova.privsep.utils.supports_direct_io', return_value=False)
+    @mock.patch('oslo_concurrency.processutils.execute')
+    @mock.patch('os.rename')
+    def test_disk_raw_to_qcow2_no_directio(self, mock_rename, mock_execute,
+                                           mock_direct_io, mock_disk_op_sema):
+        # Test the scenario where we have no support for direct IO.
+        # This could be removed when we add unit tests for convert_image().
+        path = '/test/disk'
+        _path_qcow = path + '_qcow'
+
+        self.drvr._disk_raw_to_qcow2(path)
+        mock_disk_op_sema.__enter__.assert_called_once()
+        mock_direct_io.assert_called_once_with(CONF.instances_path)
+        mock_execute.assert_has_calls([
+            mock.call('qemu-img', 'convert', '-t', 'writethrough',
+                      '-O', 'qcow2', '-f', 'raw', path, _path_qcow)])
         mock_rename.assert_has_calls([
             mock.call(_path_qcow, path)])
 
@@ -20418,37 +20777,62 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
                 '._get_mediated_devices')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver'
                 '._get_mdev_capable_devices')
-    def test_get_vgpu_total(self, get_mdev_devs, get_mdevs):
-        get_mdev_devs.return_value = [
-            {'dev_id': 'pci_0000_84_00_0',
-             'vendor_id': 0x10de,
-             'types': {'nvidia-11': {'availableInstances': 14,
+    def test_get_gpu_inventories(self, get_mdev_capable_devs,
+                                  get_mediated_devices):
+        get_mdev_capable_devs.return_value = [
+            {"dev_id": "pci_0000_06_00_0",
+             "vendor_id": 0x10de,
+             "types": {'nvidia-11': {'availableInstances': 15,
                                      'name': 'GRID M60-0B',
                                      'deviceAPI': 'vfio-pci'},
-                        }}]
-        get_mdevs.return_value = [
-            {'dev_id': 'mdev_4b20d080_1b54_4048_85b3_a6a62d165c01',
-             'uuid': "4b20d080-1b54-4048-85b3-a6a62d165c01",
-             'parent': 'pci_0000_84_00_0',
-             'type': 'nvidia-11',
-             'iommuGroup': 1
-            },
-            {'dev_id': 'mdev_4b20d080_1b54_4048_85b3_a6a62d165c02',
-             'uuid': "4b20d080-1b54-4048-85b3-a6a62d165c02",
-             'parent': 'pci_0000_84_00_0',
-             'type': 'nvidia-11',
-             'iommuGroup': 1
-            },
+                       }
+             },
+            {"dev_id": "pci_0000_07_00_0",
+             "vendor_id": 0x0000,
+             "types": {'nvidia-11': {'availableInstances': 7,
+                                     'name': 'GRID M60-0B',
+                                     'deviceAPI': 'vfio-pci'},
+                       }
+             },
         ]
+        get_mediated_devices.return_value = [{'dev_id': 'mdev_some_uuid1',
+                                              'uuid': uuids.mdev1,
+                                              'parent': "pci_0000_06_00_0",
+                                              'type': 'nvidia-11',
+                                              'iommu_group': 1},
+                                             {'dev_id': 'mdev_some_uuid2',
+                                              'uuid': uuids.mdev2,
+                                              'parent': "pci_0000_07_00_0",
+                                              'type': 'nvidia-11',
+                                              'iommu_group': 1}]
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
 
-        # By default, no specific types are supported
-        self.assertEqual(0, self.drvr._get_vgpu_total())
+        # If the operator doesn't provide GPU types
+        self.assertEqual({}, drvr._get_gpu_inventories())
 
-        # Now, ask for only one
+        # Now, set a specific GPU type
         self.flags(enabled_vgpu_types=['nvidia-11'], group='devices')
-        # We have 14 available for nvidia-11. We also have 2 mdevs of the type.
-        # So, as a total, we have 14+2, hence 16.
-        self.assertEqual(16, self.drvr._get_vgpu_total())
+        expected = {
+            # the first GPU also has one mdev allocated against it
+            'pci_0000_06_00_0': {'total': 15 + 1,
+                                 'max_unit': 15 + 1,
+                                 'min_unit': 1,
+                                 'step_size': 1,
+                                 'reserved': 0,
+                                 'allocation_ratio': 1.0,
+                                 },
+            # the second GPU also has another mdev
+            'pci_0000_07_00_0': {'total': 7 + 1,
+                                 'max_unit': 7 + 1,
+                                 'min_unit': 1,
+                                 'step_size': 1,
+                                 'reserved': 0,
+                                 'allocation_ratio': 1.0,
+                                 },
+        }
+        self.assertEqual(expected, drvr._get_gpu_inventories())
+        get_mdev_capable_devs.assert_called_once_with(types=['nvidia-11'])
+        get_mediated_devices.assert_called_once_with(types=['nvidia-11'])
 
     @mock.patch.object(host.Host, 'device_lookup_by_name')
     @mock.patch.object(host.Host, 'list_mdev_capable_devices')

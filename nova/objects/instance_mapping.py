@@ -10,7 +10,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
+
+from oslo_log import log as logging
 from oslo_utils import versionutils
+import six
 from sqlalchemy.orm import joinedload
 from sqlalchemy.sql import false
 from sqlalchemy.sql import or_
@@ -19,23 +23,30 @@ from nova import context as nova_context
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
 from nova import exception
+from nova.i18n import _
 from nova import objects
 from nova.objects import base
 from nova.objects import cell_mapping
 from nova.objects import fields
+from nova.objects import virtual_interface
+
+
+LOG = logging.getLogger(__name__)
 
 
 @base.NovaObjectRegistry.register
 class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Add queued_for_delete
-    VERSION = '1.1'
+    # Version 1.2: Add user_id
+    VERSION = '1.2'
 
     fields = {
         'id': fields.IntegerField(read_only=True),
         'instance_uuid': fields.UUIDField(),
         'cell_mapping': fields.ObjectField('CellMapping', nullable=True),
         'project_id': fields.StringField(),
+        'user_id': fields.StringField(),
         'queued_for_delete': fields.BooleanField(default=False),
         }
 
@@ -43,9 +54,20 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         super(InstanceMapping, self).obj_make_compatible(primitive,
                                                          target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 2) and 'user_id' in primitive:
+            del primitive['user_id']
         if target_version < (1, 1):
             if 'queued_for_delete' in primitive:
                 del primitive['queued_for_delete']
+
+    def obj_load_attr(self, attrname):
+        if attrname == 'user_id':
+            LOG.error('The unset user_id attribute of an unmigrated instance '
+                      'mapping should not be accessed.')
+            raise exception.ObjectActionError(
+                action='obj_load_attr',
+                reason=_('attribute user_id is not lazy-loadable'))
+        super(InstanceMapping, self).obj_load_attr(attrname)
 
     def _update_with_cell_id(self, updates):
         cell_mapping_obj = updates.pop("cell_mapping", None)
@@ -63,6 +85,11 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
                 if db_value:
                     db_value = cell_mapping.CellMapping._from_db_object(
                         context, cell_mapping.CellMapping(), db_value)
+            if key == 'user_id' and db_value is None:
+                # NOTE(melwitt): If user_id is NULL, we can't set the field
+                # because it's non-nullable. We don't plan for any code to read
+                # the user_id field at this time, so skip setting it.
+                continue
             setattr(instance_mapping, key, db_value)
         instance_mapping.obj_reset_changes()
         instance_mapping._context = context
@@ -193,6 +220,73 @@ def populate_queued_for_delete(context, max_count):
             break
 
     return processed, processed
+
+
+@db_api.api_context_manager.writer
+def populate_user_id(context, max_count):
+    cells = objects.CellMappingList.get_all(context)
+    cms_by_id = {cell.id: cell for cell in cells}
+    done = 0
+    unmigratable_ims = False
+    ims = (
+        # Get a list of instance mappings which do not have user_id populated.
+        # We need to include records with queued_for_delete=True because they
+        # include SOFT_DELETED instances, which could be restored at any time
+        # in the future. If we don't migrate SOFT_DELETED instances now, we
+        # wouldn't be able to retire this migration code later. Also filter
+        # out the marker instance created by the virtual interface migration.
+        context.session.query(api_models.InstanceMapping)
+        .filter_by(user_id=None)
+        .filter(api_models.InstanceMapping.project_id !=
+                virtual_interface.FAKE_UUID)
+        .limit(max_count).all())
+    found = len(ims)
+    ims_by_inst_uuid = {}
+    inst_uuids_by_cell_id = collections.defaultdict(set)
+    for im in ims:
+        ims_by_inst_uuid[im.instance_uuid] = im
+        inst_uuids_by_cell_id[im.cell_id].add(im.instance_uuid)
+    for cell_id, inst_uuids in inst_uuids_by_cell_id.items():
+        # We cannot migrate instance mappings that don't have a cell yet.
+        if cell_id is None:
+            unmigratable_ims = True
+            continue
+        with nova_context.target_cell(context, cms_by_id[cell_id]) as cctxt:
+            # We need to migrate SOFT_DELETED instances because they could be
+            # restored at any time in the future, preventing us from being able
+            # to remove any other interim online data migration code we have,
+            # if we don't migrate them here.
+            # NOTE: it's not possible to query only for SOFT_DELETED instances.
+            # We must query for both deleted and SOFT_DELETED instances.
+            filters = {'uuid': inst_uuids}
+            try:
+                instances = objects.InstanceList.get_by_filters(
+                    cctxt, filters, expected_attrs=[])
+            except Exception as exp:
+                LOG.warning('Encountered exception: "%s" while querying '
+                            'instances from cell: %s. Continuing to the next '
+                            'cell.', six.text_type(exp),
+                            cms_by_id[cell_id].identity)
+                continue
+        # Walk through every instance that has a mapping needing to be updated
+        # and update it.
+        for instance in instances:
+            im = ims_by_inst_uuid.pop(instance.uuid)
+            im.user_id = instance.user_id
+            context.session.add(im)
+            done += 1
+        if ims_by_inst_uuid:
+            unmigratable_ims = True
+        if done >= max_count:
+            break
+
+    if unmigratable_ims:
+        LOG.warning('Some instance mappings were not migratable. This may '
+                    'be transient due to in-flight instance builds, or could '
+                    'be due to stale data that will be cleaned up after '
+                    'running "nova-manage db archive_deleted_rows --purge".')
+
+    return found, done
 
 
 @base.NovaObjectRegistry.register

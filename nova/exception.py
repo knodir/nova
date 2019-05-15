@@ -1804,6 +1804,11 @@ class PciConfigInvalidWhitelist(Invalid):
     msg_fmt = _("Invalid PCI devices Whitelist config: %(reason)s")
 
 
+class PciRequestFromVIFNotFound(NotFound):
+    msg_fmt = _("Failed to locate PCI request associated with the given VIF "
+                "PCI address: %(pci_slot)s on compute node: %(node_id)s")
+
+
 # Cannot be templated, msg needs to be constructed when raised.
 class InternalError(NovaException):
     """Generic hypervisor errors.
@@ -2160,11 +2165,9 @@ class NetworksWithQoSPolicyNotSupported(Invalid):
 
 
 class CreateWithPortResourceRequestOldVersion(Invalid):
-    # TODO(gibi): Mention the specific microversion needed for the support
-    # after such microversion is merged
     msg_fmt = _("Creating servers with ports having resource requests, like a "
                 "port with a QoS minimum bandwidth policy, is not supported "
-                "with this microversion")
+                "until microversion 2.72.")
 
 
 class InvalidReservedMemoryPagesOption(Invalid):
@@ -2276,6 +2279,16 @@ class NeutronAdminCredentialConfigurationInvalid(Invalid):
 
 class InvalidEmulatorThreadsPolicy(Invalid):
     msg_fmt = _("CPU emulator threads option requested is invalid, "
+                "given: '%(requested)s', available: '%(available)s'.")
+
+
+class InvalidCPUAllocationPolicy(Invalid):
+    msg_fmt = _("CPU policy requested from '%(source)s' is invalid, "
+                "given: '%(requested)s', available: '%(available)s'.")
+
+
+class InvalidCPUThreadAllocationPolicy(Invalid):
+    msg_fmt = _("CPU thread policy requested from '%(source)s' is invalid, "
                 "given: '%(requested)s', available: '%(available)s'.")
 
 

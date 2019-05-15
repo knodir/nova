@@ -130,6 +130,9 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
         self.stub_out('nova.privsep.linux_net.set_device_mtu', fake_noop)
         self.stub_out('nova.privsep.linux_net.set_device_enabled', fake_noop)
         self.stub_out('nova.privsep.linux_net.set_device_macaddr', fake_noop)
+        self.stub_out('nova.privsep.linux_net.routes_show', fake_noop)
+        self.stub_out('nova.privsep.linux_net.lookup_ip', fake_noop)
+        self.stub_out('nova.privsep.linux_net.change_ip', fake_noop)
 
         if self.availability_zones:
             self.useFixture(

@@ -1325,9 +1325,10 @@ class LibvirtDriver(driver.ComputeDriver):
                      driver_block_device.get_volume_id(connection_info),
                      instance=instance)
 
-    def _extend_volume(self, connection_info, instance):
+    def _extend_volume(self, connection_info, instance, requested_size):
         vol_driver = self._get_volume_driver(connection_info)
-        return vol_driver.extend_volume(connection_info, instance)
+        return vol_driver.extend_volume(connection_info, instance,
+                                        requested_size)
 
     def _use_native_luks(self, encryption=None):
         """Is LUKS the required provider and native QEMU LUKS available
@@ -1677,9 +1678,10 @@ class LibvirtDriver(driver.ComputeDriver):
         self._disconnect_volume(context, connection_info, instance,
                                 encryption=encryption)
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         try:
-            new_size = self._extend_volume(connection_info, instance)
+            new_size = self._extend_volume(connection_info, instance,
+                                           requested_size)
         except NotImplementedError:
             raise exception.ExtendVolumeNotSupported()
 
@@ -1690,7 +1692,22 @@ class LibvirtDriver(driver.ComputeDriver):
             state = guest.get_power_state(self._host)
             active_state = state in (power_state.RUNNING, power_state.PAUSED)
             if active_state:
-                disk_path = connection_info['data']['device_path']
+                if 'device_path' in connection_info['data']:
+                    disk_path = connection_info['data']['device_path']
+                else:
+                    # Some drivers (eg. net) don't put the device_path
+                    # into the connection_info. Match disks by their serial
+                    # number instead
+                    volume_id = driver_block_device.get_volume_id(
+                        connection_info)
+                    disk = next(iter([
+                        d for d in guest.get_all_disks()
+                        if d.serial == volume_id
+                    ]), None)
+                    if not disk:
+                        raise exception.VolumeNotFound(volume_id=volume_id)
+                    disk_path = disk.target_dev
+
                 LOG.debug('resizing block device %(dev)s to %(size)u kb',
                           {'dev': disk_path, 'size': new_size})
                 dev = guest.get_block_device(disk_path)
@@ -1832,8 +1849,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _create_snapshot_metadata(self, image_meta, instance,
                                   img_fmt, snp_name):
-        metadata = {'is_public': False,
-                    'status': 'active',
+        metadata = {'status': 'active',
                     'name': snp_name,
                     'properties': {
                                    'kernel_id': instance.kernel_id,
@@ -5013,9 +5029,6 @@ class LibvirtDriver(driver.ComputeDriver):
     def _create_pty_device(self, guest_cfg, char_dev_cls, target_type=None,
                            log_path=None):
 
-        if CONF.serial_console.enabled:
-            return
-
         consolepty = char_dev_cls()
         consolepty.target_type = target_type
         consolepty.type = "pty"
@@ -5822,26 +5835,91 @@ class LibvirtDriver(driver.ComputeDriver):
         requested_types = CONF.devices.enabled_vgpu_types[:1]
         return requested_types
 
-    def _get_vgpu_total(self):
-        """Returns the number of total available vGPUs for any GPU type that is
-        enabled with the enabled_vgpu_types CONF option.
+    def _count_mediated_devices(self, enabled_vgpu_types):
+        """Counts the sysfs objects (handles) that represent a mediated device
+        and filtered by $enabled_vgpu_types.
+
+        Those handles can be in use by a libvirt guest or not.
+
+        :param enabled_vgpu_types: list of enabled VGPU types on this host
+        :returns: dict, keyed by parent GPU libvirt PCI device ID, of number of
+        mdev device handles for that GPU
         """
-        requested_types = self._get_supported_vgpu_types()
+
+        counts_per_parent = collections.defaultdict(int)
+        mediated_devices = self._get_mediated_devices(types=enabled_vgpu_types)
+        for mdev in mediated_devices:
+            counts_per_parent[mdev['parent']] += 1
+        return counts_per_parent
+
+    def _count_mdev_capable_devices(self, enabled_vgpu_types):
+        """Counts the mdev-capable devices on this host filtered by
+        $enabled_vgpu_types.
+
+        :param enabled_vgpu_types: list of enabled VGPU types on this host
+        :returns: dict, keyed by device name, to an integer count of available
+            instances of each type per device
+        """
+        mdev_capable_devices = self._get_mdev_capable_devices(
+            types=enabled_vgpu_types)
+        counts_per_dev = collections.defaultdict(int)
+        for dev in mdev_capable_devices:
+            # dev_id is the libvirt name for the PCI device,
+            # eg. pci_0000_84_00_0 which matches a PCI address of 0000:84:00.0
+            dev_name = dev['dev_id']
+            for _type in dev['types']:
+                available = dev['types'][_type]['availableInstances']
+                # TODO(sbauza): Once we support multiple types, check which
+                # PCI devices are set for this type
+                # NOTE(sbauza): Even if we support multiple types, Nova will
+                # only use one per physical GPU.
+                counts_per_dev[dev_name] += available
+        return counts_per_dev
+
+    def _get_gpu_inventories(self):
+        """Returns the inventories for each physical GPU for a specific type
+        supported by the enabled_vgpu_types CONF option.
+
+        :returns: dict, keyed by libvirt PCI name, of dicts like:
+                {'pci_0000_84_00_0':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': $TOTAL,
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                    }
+                }
+        """
+
         # Bail out early if operator doesn't care about providing vGPUs
-        if not requested_types:
-            return 0
+        enabled_vgpu_types = self._get_supported_vgpu_types()
+        if not enabled_vgpu_types:
+            return {}
+        inventories = {}
+        count_per_parent = self._count_mediated_devices(enabled_vgpu_types)
+        for dev_name, count in count_per_parent.items():
+            inventories[dev_name] = {'total': count}
         # Filter how many available mdevs we can create for all the supported
         # types.
-        mdev_capable_devices = self._get_mdev_capable_devices(requested_types)
-        vgpus = 0
-        for dev in mdev_capable_devices:
-            for _type in dev['types']:
-                vgpus += dev['types'][_type]['availableInstances']
-        # Count the already created (but possibly not assigned to a guest)
-        # mdevs for all the supported types
-        mediated_devices = self._get_mediated_devices(requested_types)
-        vgpus += len(mediated_devices)
-        return vgpus
+        count_per_dev = self._count_mdev_capable_devices(enabled_vgpu_types)
+        # Combine the counts into the dict that we return to the caller.
+        for dev_name, count in count_per_dev.items():
+            inv_per_parent = inventories.setdefault(
+                dev_name, {'total': 0})
+            inv_per_parent['total'] += count
+            inv_per_parent.update({
+                'min_unit': 1,
+                'step_size': 1,
+                'reserved': 0,
+                # NOTE(sbauza): There is no sense to have a ratio but 1.0
+                # since we can't overallocate vGPU resources
+                'allocation_ratio': 1.0,
+                # FIXME(sbauza): Some vendors could support only one
+                'max_unit': inv_per_parent['total'],
+            })
+
+        return inventories
 
     def _get_instance_capabilities(self):
         """Get hypervisor instance capabilities
@@ -5861,11 +5939,17 @@ class LibvirtDriver(driver.ComputeDriver):
             for dt in g.domtype:
                 if dt != CONF.libvirt.virt_type:
                     continue
-                instance_cap = (
-                    fields.Architecture.canonicalize(g.arch),
-                    fields.HVType.canonicalize(dt),
-                    fields.VMMode.canonicalize(g.ostype))
-                instance_caps.append(instance_cap)
+                try:
+                    instance_cap = (
+                        fields.Architecture.canonicalize(g.arch),
+                        fields.HVType.canonicalize(dt),
+                        fields.VMMode.canonicalize(g.ostype))
+                    instance_caps.append(instance_cap)
+                except exception.InvalidArchitectureName:
+                    # NOTE(danms): Libvirt is exposing a guest arch that nova
+                    # does not even know about. Avoid aborting here and
+                    # continue to process the rest.
+                    pass
 
         return instance_caps
 
@@ -5938,6 +6022,9 @@ class LibvirtDriver(driver.ComputeDriver):
                     return {
                         'dev_type': fields.PciDeviceType.SRIOV_VF,
                         'parent_addr': phys_address,
+                        'parent_ifname':
+                            pci_utils.get_ifname_by_pci_address(
+                                pci_address, pf_interface=True),
                     }
 
             return {'dev_type': fields.PciDeviceType.STANDARD}
@@ -6076,7 +6163,7 @@ class LibvirtDriver(driver.ComputeDriver):
         device = {
             "dev_id": cfgdev.name,
             # name is like mdev_00ead764_fdc0_46b6_8db9_2963f5c815b4
-            "uuid": str(uuid.UUID(cfgdev.name[5:].replace('_', '-'))),
+            "uuid": libvirt_utils.mdev_name2uuid(cfgdev.name),
             # the physical GPU PCI device
             "parent": cfgdev.parent,
             "type": cfgdev.mdev_information.type,
@@ -6110,6 +6197,8 @@ class LibvirtDriver(driver.ComputeDriver):
 
         :returns: A dictionary of keys being mediated device UUIDs and their
                   respective values the instance UUID of the guest using it.
+                  Returns an empty dict if an instance is provided but not
+                  found in the hypervisor.
         """
         allocated_mdevs = {}
         if instance:
@@ -6546,22 +6635,12 @@ class LibvirtDriver(driver.ComputeDriver):
         :raises ReshapeNeeded: If allocations is None and any inventory needs
             to be moved from one provider to another and/or to a different
             resource class.
+        :raises: ReshapeFailed if the requested tree reshape fails for
+            whatever reason.
         """
         disk_gb = int(self._get_local_gb_info()['total'])
         memory_mb = int(self._host.get_memory_mb_total())
         vcpus = self._get_vcpu_total()
-
-        # NOTE(sbauza): For the moment, the libvirt driver only supports
-        # providing the total number of virtual GPUs for a single GPU type. If
-        # you have multiple physical GPUs, each of them providing multiple GPU
-        # types, libvirt will return the total sum of virtual GPUs
-        # corresponding to the single type passed in enabled_vgpu_types
-        # configuration option. Eg. if you have 2 pGPUs supporting 'nvidia-35',
-        # each of them having 16 available instances, the total here will be
-        # 32.
-        # If one of the 2 pGPUs doesn't support 'nvidia-35', it won't be used.
-        # TODO(sbauza): Use traits to make a better world.
-        vgpus = self._get_vgpu_total()
 
         # NOTE(yikun): If the inv record does not exists, the allocation_ratio
         # will use the CONF.xxx_allocation_ratio value if xxx_allocation_ratio
@@ -6604,14 +6683,17 @@ class LibvirtDriver(driver.ComputeDriver):
             'reserved': self._get_reserved_host_disk_gb_from_config(),
         }
 
-        if vgpus > 0:
-            # Only provide VGPU resource classes if the driver supports it.
-            result[orc.VGPU] = {
-                'total': vgpus,
-                'min_unit': 1,
-                'max_unit': vgpus,
-                'step_size': 1,
-                }
+        # NOTE(sbauza): For the moment, the libvirt driver only supports
+        # providing the total number of virtual GPUs for a single GPU type. If
+        # you have multiple physical GPUs, each of them providing multiple GPU
+        # types, only one type will be used for each of the physical GPUs.
+        # If one of the pGPUs doesn't support this type, it won't be used.
+        # TODO(sbauza): Use traits to make a better world.
+        inventories_dict = self._get_gpu_inventories()
+        if inventories_dict:
+            self._update_provider_tree_for_vgpu(
+                inventories_dict, provider_tree, nodename,
+                allocations=allocations)
 
         provider_tree.update_inventory(nodename, result)
 
@@ -6628,6 +6710,351 @@ class LibvirtDriver(driver.ComputeDriver):
         # Now that we updated the ProviderTree, we want to store it locally
         # so that spawn() or other methods can access it thru a getter
         self.provider_tree = copy.deepcopy(provider_tree)
+
+    @staticmethod
+    def _is_reshape_needed_vgpu_on_root(provider_tree, nodename):
+        """Determine if root RP has VGPU inventories.
+
+        Check to see if the root compute node provider in the tree for
+        this host already has VGPU inventory because if it does, we either
+        need to signal for a reshape (if _update_provider_tree_for_vgpu()
+        has no allocations) or move the allocations within the ProviderTree if
+        passed.
+
+        :param provider_tree: The ProviderTree object for this host.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :returns: boolean, whether we have VGPU root inventory.
+        """
+        root_node = provider_tree.data(nodename)
+        return orc.VGPU in root_node.inventory
+
+    @staticmethod
+    def _ensure_pgpu_providers(inventories_dict, provider_tree, nodename):
+        """Ensures GPU inventory providers exist in the tree for $nodename.
+
+        GPU providers are named $nodename_$gpu-device-id, e.g.
+        ``somehost.foo.bar.com_pci_0000_84_00_0``.
+
+        :param inventories_dict: Dictionary of inventories for VGPU class
+            directly provided by _get_gpu_inventories() and which looks like:
+                {'pci_0000_84_00_0':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': $MAX_UNIT, # defaults to $TOTAL
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                    }
+                }
+        :param provider_tree: The ProviderTree to update.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :returns: dict, keyed by GPU device ID, to ProviderData object
+            representing that resource provider in the tree
+        """
+        # Create the VGPU child providers if they do not already exist.
+        # TODO(mriedem): For the moment, _get_supported_vgpu_types() only
+        # returns one single type but that will be changed once we support
+        # multiple types.
+        # Note that we can't support multiple vgpu types until a reshape has
+        # been performed on the vgpu resources provided by the root provider,
+        # if any.
+
+        # Dict of PGPU RPs keyed by their libvirt PCI name
+        pgpu_rps = {}
+        for pgpu_dev_id, inventory in inventories_dict.items():
+            # For each physical GPU, we make sure to have a child provider
+            pgpu_rp_name = '%s_%s' % (nodename, pgpu_dev_id)
+            if not provider_tree.exists(pgpu_rp_name):
+                # This is the first time creating the child provider so add
+                # it to the tree under the root node provider.
+                provider_tree.new_child(pgpu_rp_name, nodename)
+            # We want to idempotently return the resource providers with VGPUs
+            pgpu_rp = provider_tree.data(pgpu_rp_name)
+            pgpu_rps[pgpu_dev_id] = pgpu_rp
+
+            # The VGPU inventory goes on a child provider of the given root
+            # node, identified by $nodename.
+            pgpu_inventory = {orc.VGPU: inventory}
+            provider_tree.update_inventory(pgpu_rp_name, pgpu_inventory)
+        return pgpu_rps
+
+    @staticmethod
+    def _assert_is_root_provider(
+            rp_uuid, root_node, consumer_uuid, alloc_data):
+        """Asserts during a reshape that rp_uuid is for the root node provider.
+
+        When reshaping, inventory and allocations should be on the root node
+        provider and then moved to child providers.
+
+        :param rp_uuid: UUID of the provider that holds inventory/allocations.
+        :param root_node: ProviderData object representing the root node in a
+            provider tree.
+        :param consumer_uuid: UUID of the consumer (instance) holding resource
+            allocations against the given rp_uuid provider.
+        :param alloc_data: dict of allocation data for the consumer.
+        :raises: ReshapeFailed if rp_uuid is not the root node indicating a
+            reshape was needed but the inventory/allocation structure is not
+            expected.
+        """
+        if rp_uuid != root_node.uuid:
+            # Something is wrong - VGPU inventory should
+            # only be on the root node provider if we are
+            # reshaping the tree.
+            msg = (_('Unexpected VGPU resource allocation '
+                     'on provider %(rp_uuid)s for consumer '
+                     '%(consumer_uuid)s: %(alloc_data)s. '
+                     'Expected VGPU allocation to be on root '
+                     'compute node provider %(root_uuid)s.')
+                   % {'rp_uuid': rp_uuid,
+                      'consumer_uuid': consumer_uuid,
+                      'alloc_data': alloc_data,
+                      'root_uuid': root_node.uuid})
+            raise exception.ReshapeFailed(error=msg)
+
+    def _get_assigned_mdevs_for_reshape(
+            self, instance_uuid, rp_uuid, alloc_data):
+        """Gets the mediated devices assigned to the instance during a reshape.
+
+        :param instance_uuid: UUID of the instance consuming VGPU resources
+            on this host.
+        :param rp_uuid: UUID of the resource provider with VGPU inventory being
+            consumed by the instance.
+        :param alloc_data: dict of allocation data for the instance consumer.
+        :return: list of mediated device UUIDs assigned to the instance
+        :raises: ReshapeFailed if the instance is not found in the hypervisor
+            or no mediated devices were found to be assigned to the instance
+            indicating VGPU allocations are out of sync with the hypervisor
+        """
+        # FIXME(sbauza): We don't really need an Instance
+        # object, but given some libvirt.host logs needs
+        # to have an instance name, just provide a fake one
+        Instance = collections.namedtuple('Instance', ['uuid', 'name'])
+        instance = Instance(uuid=instance_uuid, name=instance_uuid)
+        mdevs = self._get_all_assigned_mediated_devices(instance)
+        # _get_all_assigned_mediated_devices returns {} if the instance is
+        # not found in the hypervisor
+        if not mdevs:
+            # If we found a VGPU allocation against a consumer
+            # which is not an instance, the only left case for
+            # Nova would be a migration but we don't support
+            # this at the moment.
+            msg = (_('Unexpected VGPU resource allocation on provider '
+                     '%(rp_uuid)s for consumer %(consumer_uuid)s: '
+                     '%(alloc_data)s. The allocation is made against a '
+                     'non-existing instance or there are no devices assigned.')
+                   % {'rp_uuid': rp_uuid, 'consumer_uuid': instance_uuid,
+                      'alloc_data': alloc_data})
+            raise exception.ReshapeFailed(error=msg)
+        return mdevs
+
+    def _count_vgpus_per_pgpu(self, mdev_uuids):
+        """Count the number of VGPUs per physical GPU mediated device.
+
+        :param mdev_uuids: List of physical GPU mediated device UUIDs.
+        :return: dict, keyed by PGPU device ID, to count of VGPUs on that
+            device
+        """
+        vgpu_count_per_pgpu = collections.defaultdict(int)
+        for mdev_uuid in mdev_uuids:
+            # libvirt name is like mdev_00ead764_fdc0_46b6_8db9_2963f5c815b4
+            dev_name = libvirt_utils.mdev_uuid2name(mdev_uuid)
+            # Count how many vGPUs are in use for this instance
+            dev_info = self._get_mediated_device_information(dev_name)
+            pgpu_dev_id = dev_info['parent']
+            vgpu_count_per_pgpu[pgpu_dev_id] += 1
+        return vgpu_count_per_pgpu
+
+    @staticmethod
+    def _check_vgpu_allocations_match_real_use(
+            vgpu_count_per_pgpu, expected_usage, rp_uuid, consumer_uuid,
+            alloc_data):
+        """Checks that the number of GPU devices assigned to the consumer
+        matches what is expected from the allocations in the placement service
+        and logs a warning if there is a mismatch.
+
+        :param vgpu_count_per_pgpu: dict, keyed by PGPU device ID, to count of
+            VGPUs on that device where each device is assigned to the consumer
+            (guest instance on this hypervisor)
+        :param expected_usage: The expected usage from placement for the
+            given resource provider and consumer
+        :param rp_uuid: UUID of the resource provider with VGPU inventory being
+            consumed by the instance
+        :param consumer_uuid: UUID of the consumer (instance) holding resource
+            allocations against the given rp_uuid provider
+        :param alloc_data: dict of allocation data for the instance consumer
+        """
+        actual_usage = sum(vgpu_count_per_pgpu.values())
+        if actual_usage != expected_usage:
+            # Don't make it blocking, just make sure you actually correctly
+            # allocate the existing resources
+            LOG.warning(
+                'Unexpected VGPU resource allocation on provider %(rp_uuid)s '
+                'for consumer %(consumer_uuid)s: %(alloc_data)s. Allocations '
+                '(%(expected_usage)s) differ from actual use '
+                '(%(actual_usage)s).',
+                {'rp_uuid': rp_uuid, 'consumer_uuid': consumer_uuid,
+                 'alloc_data': alloc_data, 'expected_usage': expected_usage,
+                 'actual_usage': actual_usage})
+
+    def _reshape_vgpu_allocations(
+            self, rp_uuid, root_node, consumer_uuid, alloc_data, resources,
+            pgpu_rps):
+        """Update existing VGPU allocations by moving them from the root node
+        provider to the child provider for the given VGPU provider.
+
+        :param rp_uuid: UUID of the VGPU resource provider with allocations
+            from consumer_uuid (should be the root node provider before
+            reshaping occurs)
+        :param root_node: ProviderData object for the root compute node
+            resource provider in the provider tree
+        :param consumer_uuid: UUID of the consumer (instance) with VGPU
+            allocations against the resource provider represented by rp_uuid
+        :param alloc_data: dict of allocation information for consumer_uuid
+        :param resources: dict, keyed by resource class, of resources allocated
+            to consumer_uuid from rp_uuid
+        :param pgpu_rps: dict, keyed by GPU device ID, to ProviderData object
+            representing that resource provider in the tree
+        :raises: ReshapeFailed if the reshape fails for whatever reason
+        """
+        # We've found VGPU allocations on a provider. It should be the root
+        # node provider.
+        self._assert_is_root_provider(
+            rp_uuid, root_node, consumer_uuid, alloc_data)
+
+        # Find which physical GPU corresponds to this allocation.
+        mdev_uuids = self._get_assigned_mdevs_for_reshape(
+            consumer_uuid, rp_uuid, alloc_data)
+
+        vgpu_count_per_pgpu = self._count_vgpus_per_pgpu(mdev_uuids)
+
+        # We need to make sure we found all the mediated devices that
+        # correspond to an allocation.
+        self._check_vgpu_allocations_match_real_use(
+            vgpu_count_per_pgpu, resources[orc.VGPU],
+            rp_uuid, consumer_uuid, alloc_data)
+
+        # Add the VGPU allocation for each VGPU provider.
+        allocs = alloc_data['allocations']
+        for pgpu_dev_id, pgpu_rp in pgpu_rps.items():
+            vgpu_count = vgpu_count_per_pgpu[pgpu_dev_id]
+            if vgpu_count:
+                allocs[pgpu_rp.uuid] = {
+                    'resources': {
+                        orc.VGPU: vgpu_count
+                    }
+                }
+        # And remove the VGPU allocation from the root node provider.
+        del resources[orc.VGPU]
+
+    def _reshape_gpu_resources(
+            self, allocations, root_node, pgpu_rps):
+        """Reshapes the provider tree moving VGPU inventory from root to child
+
+        :param allocations:
+            Dict of allocation data of the form:
+              { $CONSUMER_UUID: {
+                    # The shape of each "allocations" dict below is identical
+                    # to the return from GET /allocations/{consumer_uuid}
+                    "allocations": {
+                        $RP_UUID: {
+                            "generation": $RP_GEN,
+                            "resources": {
+                                $RESOURCE_CLASS: $AMOUNT,
+                                ...
+                            },
+                        },
+                        ...
+                    },
+                    "project_id": $PROJ_ID,
+                    "user_id": $USER_ID,
+                    "consumer_generation": $CONSUMER_GEN,
+                },
+                ...
+              }
+        :params root_node: The root node in the provider tree
+        :params pgpu_rps: dict, keyed by GPU device ID, to ProviderData object
+            representing that resource provider in the tree
+        """
+        LOG.info('Reshaping tree; moving VGPU allocations from root '
+                 'provider %s to child providers %s.', root_node.uuid,
+                 pgpu_rps.values())
+        # For each consumer in the allocations dict, look for VGPU
+        # allocations and move them to the VGPU provider.
+        for consumer_uuid, alloc_data in allocations.items():
+            # Copy and iterate over the current set of providers to avoid
+            # modifying keys while iterating.
+            allocs = alloc_data['allocations']
+            for rp_uuid in list(allocs):
+                resources = allocs[rp_uuid]['resources']
+                if orc.VGPU in resources:
+                    self._reshape_vgpu_allocations(
+                        rp_uuid, root_node, consumer_uuid, alloc_data,
+                        resources, pgpu_rps)
+
+    def _update_provider_tree_for_vgpu(self, inventories_dict, provider_tree,
+                                       nodename, allocations=None):
+        """Updates the provider tree for VGPU inventory.
+
+        Before Stein, VGPU inventory and allocations were on the root compute
+        node provider in the tree. Starting in Stein, the VGPU inventory is
+        on a child provider in the tree. As a result, this method will
+        "reshape" the tree if necessary on first start of this compute service
+        in Stein.
+
+        :param inventories_dict: Dictionary of inventories for VGPU class
+            directly provided by _get_gpu_inventories() and which looks like:
+                {'pci_0000_84_00_0':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': $MAX_UNIT, # defaults to $TOTAL
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                    }
+                }
+        :param provider_tree: The ProviderTree to update.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :param allocations: If not None, indicates a reshape was requested and
+            should be performed.
+        :raises: nova.exception.ReshapeNeeded if ``allocations`` is None and
+            the method determines a reshape of the tree is needed, i.e. VGPU
+            inventory and allocations must be migrated from the root node
+            provider to a child provider of VGPU resources in the tree.
+        :raises: nova.exception.ReshapeFailed if the requested tree reshape
+            fails for whatever reason.
+        """
+        # Check to see if the root compute node provider in the tree for
+        # this host already has VGPU inventory because if it does, and
+        # we're not currently reshaping (allocations is None), we need
+        # to indicate that a reshape is needed to move the VGPU inventory
+        # onto a child provider in the tree.
+
+        # Ensure GPU providers are in the ProviderTree for the given inventory.
+        pgpu_rps = self._ensure_pgpu_providers(
+            inventories_dict, provider_tree, nodename)
+
+        if self._is_reshape_needed_vgpu_on_root(provider_tree, nodename):
+            if allocations is None:
+                # We have old VGPU inventory on root RP, but we haven't yet
+                # allocations. That means we need to ask for a reshape.
+                LOG.info('Requesting provider tree reshape in order to move '
+                         'VGPU inventory from the root compute node provider '
+                         '%s to a child provider.', nodename)
+                raise exception.ReshapeNeeded()
+            # We have allocations, that means we already asked for a reshape
+            # and the Placement API returned us them. We now need to move
+            # those from the root RP to the needed children RPs.
+            root_node = provider_tree.data(nodename)
+            # Reshape VGPU provider inventory and allocations, moving them
+            # from the root node provider to the child providers.
+            self._reshape_gpu_resources(allocations, root_node, pgpu_rps)
+            # Only delete the root inventory once the reshape is done
+            if orc.VGPU in root_node.inventory:
+                del root_node.inventory[orc.VGPU]
+                provider_tree.update_inventory(nodename, root_node.inventory)
 
     def get_available_resource(self, nodename):
         """Retrieve resource information.
@@ -8429,10 +8856,7 @@ class LibvirtDriver(driver.ComputeDriver):
     def _disk_raw_to_qcow2(path):
         """Converts a raw disk to qcow2."""
         path_qcow = path + '_qcow'
-        # execute operation with disk concurrency semaphore
-        with compute_utils.disk_ops_semaphore:
-            processutils.execute('qemu-img', 'convert', '-f', 'raw',
-                                 '-O', 'qcow2', path, path_qcow)
+        images.convert_image(path, path_qcow, 'raw', 'qcow2')
         os.rename(path_qcow, path)
 
     def finish_migration(self, context, migration, instance, disk_info,
