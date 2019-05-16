@@ -71,6 +71,7 @@ from nova.conf import wsgi
 from nova.conf import xenserver
 from nova.conf import xvp
 from nova.conf import zvm
+from nova.conf import npp
 
 CONF = cfg.CONF
 
@@ -125,5 +126,6 @@ wsgi.register_opts(CONF)
 xenserver.register_opts(CONF)
 xvp.register_opts(CONF)
 zvm.register_opts(CONF)
+npp.register_opts(CONF)
 
 remote_debug.register_cli_opts(CONF)
