@@ -21,6 +21,21 @@ NPP_OPTS = [
         help="""
         When creating a simulated HostState, target_cell_uuid is needed
         """),
+    cfg.StrOpt(
+        'rabbit_username',
+        help="""
+        RabbitMQ username for npp schedulers
+        """),
+    cfg.StrOpt(
+        'rabbit_password',
+        help="""
+        RabbitMQ password for npp schedulers
+        """),
+    cfg.StrOpt(
+        'rabbit_host',
+        help="""
+        RabbitMQ host for npp schedulers
+        """),
 ]
 
 def register_opts(conf):
