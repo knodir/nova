@@ -171,6 +171,12 @@ class RequestContext(context.RequestContext):
     read_deleted = property(_get_read_deleted, _set_read_deleted,
                             _del_read_deleted)
 
+    def set_vm_name(self, vm_name):
+        self.vm_name = vm_name
+    
+    def get_vm_name(self):
+        return self.vm_name
+
     def to_dict(self):
         values = super(RequestContext, self).to_dict()
         # FIXME(dims): defensive hasattr() checks need to be
@@ -189,6 +195,7 @@ class RequestContext(context.RequestContext):
             'user_name': getattr(self, 'user_name', None),
             'service_catalog': getattr(self, 'service_catalog', None),
             'project_name': getattr(self, 'project_name', None),
+            'vm_name': getattr(self, 'vm_name', None),
         })
         # NOTE(tonyb): This can be removed once we're certain to have a
         # RequestContext contains 'is_admin_project', We can only get away with
@@ -201,7 +208,7 @@ class RequestContext(context.RequestContext):
 
     @classmethod
     def from_dict(cls, values):
-        return super(RequestContext, cls).from_dict(
+        result = super(RequestContext, cls).from_dict(
             values,
             user_id=values.get('user_id'),
             project_id=values.get('project_id'),
@@ -214,6 +221,8 @@ class RequestContext(context.RequestContext):
             quota_class=values.get('quota_class'),
             service_catalog=values.get('service_catalog'),
         )
+        result.set_vm_name(values.get('vm_name'))
+        return result
 
     def elevated(self, read_deleted=None):
         """Return a version of this context with admin flag set."""

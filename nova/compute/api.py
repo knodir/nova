@@ -84,6 +84,8 @@ from nova import utils
 from nova.virt import hardware
 from nova.volume import cinder
 
+from nova.common import benchmark
+
 LOG = logging.getLogger(__name__)
 
 get_notifier = functools.partial(rpc.get_notifier, service='compute')
@@ -1196,6 +1198,8 @@ class API(base.Base):
         strategy being performed and schedule the instance(s) for
         creation.
         """
+        context.set_vm_name(display_name)
+        benchmark.add_benchmark(context.request_id, "nova.api.start")
 
         # Normalize and setup some parameters
         if reservation_id is None:
@@ -1322,6 +1326,10 @@ class API(base.Base):
                 requested_networks=requested_networks,
                 block_device_mapping=block_device_mapping,
                 tags=tags)
+        
+        benchmark.add_benchmark(context.request_id, "nova.api.end")
+        if context.get_vm_name() == "vm_flush":
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
 
         return instances, reservation_id
 
