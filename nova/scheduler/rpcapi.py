@@ -23,6 +23,7 @@ from nova import exception as exc
 from nova.objects import base as objects_base
 from nova import profiler
 from nova import rpc
+from nova.common import benchmark
 
 CONF = nova.conf.CONF
 RPC_TOPIC = "scheduler"
@@ -132,6 +133,7 @@ class SchedulerAPI(object):
     def select_destinations(self, ctxt, spec_obj, instance_uuids,
             return_objects=False, return_alternates=False):
         # Modify the parameters if an older version is requested
+        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_scheduler.start")
         version = '4.5'
         msg_args = {'instance_uuids': instance_uuids,
                     'spec_obj': spec_obj,
@@ -157,6 +159,9 @@ class SchedulerAPI(object):
         cctxt = self.client.prepare(
             version=version, call_monitor_timeout=CONF.rpc_response_timeout,
             timeout=CONF.long_rpc_timeout)
+        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_scheduler.end")
+        if ctxt.get_vm_name() == "vm_flush":
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
         return cctxt.call(ctxt, 'select_destinations', **msg_args)
 
     def update_aggregates(self, ctxt, aggregates):

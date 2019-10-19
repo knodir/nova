@@ -36,7 +36,7 @@ from nova import quota
 from nova.scheduler.client import report
 from nova.scheduler import request_filter
 from nova.scheduler import utils
-
+from nova.common import benchmark
 
 LOG = logging.getLogger(__name__)
 
@@ -113,6 +113,7 @@ class SchedulerManager(manager.Manager):
         format but *don't* want to get alternate hosts, as is the case with the
         conductors that handle certain move operations.
         """
+        benchmark.add_benchmark(ctxt.request_id, "nova.scheduler.start")
         LOG.debug("Starting to schedule for instances: %s", instance_uuids)
 
         # TODO(sbauza): Change the method signature to only accept a spec_obj
@@ -171,6 +172,9 @@ class SchedulerManager(manager.Manager):
         if not return_objects:
             selection_dicts = [sel[0].to_dict() for sel in selections]
             return jsonutils.to_primitive(selection_dicts)
+        benchmark.add_benchmark(ctxt.request_id, "nova.scheduler.end")
+        if ctxt.get_vm_name() == "vm_flush":
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
         return selections
 
     def update_aggregates(self, ctxt, aggregates):
