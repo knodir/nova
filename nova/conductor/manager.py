@@ -57,6 +57,8 @@ from nova import servicegroup
 from nova import utils
 from nova.volume import cinder
 
+from nova.common import benchmark
+
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
@@ -1316,6 +1318,7 @@ class ComputeTaskManager(base.Base):
                                      admin_password, injected_files,
                                      requested_networks, block_device_mapping,
                                      tags=None):
+        benchmark.add_benchmark(context.request_id, "nova.conductor.start")
         # Add all the UUIDs for the instances
         instance_uuids = [spec.instance_uuid for spec in request_specs]
         try:
@@ -1495,6 +1498,9 @@ class ComputeTaskManager(base.Base):
                     block_device_mapping=instance_bdms,
                     host=host.service_host, node=host.nodename,
                     limits=host.limits, host_list=host_list)
+        benchmark.add_benchmark(context.request_id, "nova.conductor.end")
+        if context.get_vm_name() == "vm_flush":
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
 
     def _cleanup_build_artifacts(self, context, exc, instances, build_requests,
                                  request_specs, block_device_mappings, tags,

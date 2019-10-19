@@ -3,6 +3,7 @@ from datetime import datetime
 pending_benchmarks = []
 
 def flush_benchmarks(file_name):
+    global pending_benchmarks
     with open(file_name, 'a+') as f:
         for benchmark in pending_benchmarks:
             f.write("%s,%s,%s\n" % benchmark)
