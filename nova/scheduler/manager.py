@@ -36,7 +36,8 @@ from nova import quota
 from nova.scheduler.client import report
 from nova.scheduler import request_filter
 from nova.scheduler import utils
-from nova.common import benchmark
+from nova.common.benchmark import NovaBenchmarker
+benchmark = NovaBenchmarker()
 
 LOG = logging.getLogger(__name__)
 

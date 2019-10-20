@@ -97,7 +97,8 @@ from nova.virt import event as virtevent
 from nova.virt import storage_users
 from nova.virt import virtapi
 from nova.volume import cinder
-from nova.common import benchmark
+from nova.common.benchmark import NovaBenchmarker
+benchmark = NovaBenchmarker()
 
 CONF = nova.conf.CONF
 

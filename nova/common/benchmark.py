@@ -1,14 +1,16 @@
 from datetime import datetime
 
-pending_benchmarks = []
+class NovaBenchmarker(object):
+    def __init__(self):
+        self.pending_benchmarks = []
+    
+    def flush_benchmarks(self, file_name):
+        with open(file_name, 'a+') as f:
+            for benchmark in self.pending_benchmarks:
+                f.write("%s,%s,%s\n" % benchmark)
+        self.pending_benchmarks = []
 
-def flush_benchmarks(file_name):
-    global pending_benchmarks
-    with open(file_name, 'a+') as f:
-        for benchmark in pending_benchmarks:
-            f.write("%s,%s,%s\n" % benchmark)
-    pending_benchmarks = []
+    def add_benchmark(self, req_id, key):
+        self.pending_benchmarks.append((req_id, key, datetime.now()))
 
-def add_benchmark(req_id, key):
-    pending_benchmarks.append((req_id, key, datetime.now()))
 

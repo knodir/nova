@@ -21,7 +21,8 @@ from oslo_log import log as logging
 
 from nova.i18n import _LI
 from nova import loadables
-from nova.common import benchmark
+from nova.common.benchmark import NovaBenchmarker
+benchmark = NovaBenchmarker()
 
 LOG = logging.getLogger(__name__)
 

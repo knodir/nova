@@ -83,8 +83,8 @@ from nova import servicegroup
 from nova import utils
 from nova.virt import hardware
 from nova.volume import cinder
-
-from nova.common import benchmark
+from nova.common.benchmark import NovaBenchmarker
+benchmark = NovaBenchmarker()
 
 LOG = logging.getLogger(__name__)
 

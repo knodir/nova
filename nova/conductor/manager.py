@@ -56,8 +56,8 @@ from nova.scheduler import utils as scheduler_utils
 from nova import servicegroup
 from nova import utils
 from nova.volume import cinder
-
-from nova.common import benchmark
+from nova.common.benchmark import NovaBenchmarker
+benchmark = NovaBenchmarker()
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF

@@ -24,7 +24,8 @@ from nova.objects import base as objects_base
 from nova import profiler
 from nova import rpc
 
-from nova.common import benchmark
+from nova.common.benchmark import NovaBenchmarker
+benchmark = NovaBenchmarker()
 
 CONF = nova.conf.CONF
 RPC_TOPIC = 'conductor'
