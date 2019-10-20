@@ -100,6 +100,18 @@ class RequestSpec(base.NovaObject):
                                                          default=None)
     }
 
+    def set_vm_name(self, vm_name):
+        self.vm_name = vm_name
+
+    def get_vm_name(self):
+        return self.vm_name
+    
+    def set_req_id(self, req_id):
+        self.req_id = req_id
+
+    def get_req_id(self):
+        return self.req_id
+
     def obj_make_compatible(self, primitive, target_version):
         super(RequestSpec, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)

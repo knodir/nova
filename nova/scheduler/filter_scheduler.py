@@ -236,7 +236,10 @@ class FilterScheduler(driver.Scheduler):
             spec_obj.instance_uuid = instance_uuid
             # Reset the field so it's not persisted accidentally.
             spec_obj.obj_reset_changes(['instance_uuid'])
-
+            
+            spec_obj.set_vm_name(context.get_vm_name())
+            spec_obj.set_req_id(context.request_id)
+            
             hosts = self._get_sorted_hosts(spec_obj, hosts, num)
             if not hosts:
                 # NOTE(jaypipes): If we get here, that means not all instances

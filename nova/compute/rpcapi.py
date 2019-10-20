@@ -28,6 +28,7 @@ from nova.objects import base as objects_base
 from nova.objects import service as service_obj
 from nova import profiler
 from nova import rpc
+from nova.common import benchmark
 
 CONF = nova.conf.CONF
 RPC_TOPIC = "compute"
@@ -1060,6 +1061,7 @@ class ComputeAPI(object):
             requested_networks=None, security_groups=None,
             block_device_mapping=None, node=None, limits=None,
             host_list=None):
+        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_compute.start")
         # NOTE(edleafe): compute nodes can only use the dict form of limits.
         if isinstance(limits, objects.SchedulerLimits):
             limits = limits.to_dict()
@@ -1080,6 +1082,9 @@ class ComputeAPI(object):
         version = '5.0'
         cctxt = client.prepare(server=host, version=version)
         cctxt.cast(ctxt, 'build_and_run_instance', **kwargs)
+        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_compute.end")
+        if ctxt.get_vm_name() == "vm_flush":
+                benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
 
     def quiesce_instance(self, ctxt, instance):
         version = '5.0'
