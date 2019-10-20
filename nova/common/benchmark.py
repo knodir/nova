@@ -8,9 +8,9 @@ class NovaBenchmarker(object):
         with open(file_name, 'a+') as f:
             for benchmark in self.pending_benchmarks:
                 f.write("%s,%s,%s\n" % benchmark)
-        self.pending_benchmarks = []
 
-    def add_benchmark(self, req_id, key):
-        self.pending_benchmarks.append((req_id, key, datetime.now()))
+    def add_benchmark(self, req_id, key, ignore):
+        if not ignore:
+            self.pending_benchmarks.append((req_id, key, datetime.now()))
 
 

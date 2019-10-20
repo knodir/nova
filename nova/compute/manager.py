@@ -1847,7 +1847,7 @@ class ComputeManager(manager.Manager):
 
         @utils.synchronized(instance.uuid)
         def _locked_do_build_and_run_instance(*args, **kwargs):
-            benchmark.add_benchmark(context.request_id, "nova.compute.start")
+            benchmark.add_benchmark(context.request_id, "nova.compute.start", context.get_vm_name() == "vm_flush")
             # NOTE(danms): We grab the semaphore with the instance uuid
             # locked because we could wait in line to build this instance
             # for a while and we want to make sure that nothing else tries
@@ -1888,7 +1888,7 @@ class ComputeManager(manager.Manager):
                         self._build_failed(node)
                     else:
                         self._build_succeeded(node)
-            benchmark.add_benchmark(context.request_id, "nova.compute.end")
+            benchmark.add_benchmark(context.request_id, "nova.compute.end", context.get_vm_name() == "vm_flush")
             if context.get_vm_name() == "vm_flush":
                 benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
 

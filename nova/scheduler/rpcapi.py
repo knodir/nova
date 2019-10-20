@@ -134,7 +134,7 @@ class SchedulerAPI(object):
     def select_destinations(self, ctxt, spec_obj, instance_uuids,
             return_objects=False, return_alternates=False):
         # Modify the parameters if an older version is requested
-        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_scheduler.start")
+        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_scheduler.start", ctxt.get_vm_name() == "vm_flush")
         version = '4.5'
         msg_args = {'instance_uuids': instance_uuids,
                     'spec_obj': spec_obj,
@@ -160,7 +160,7 @@ class SchedulerAPI(object):
         cctxt = self.client.prepare(
             version=version, call_monitor_timeout=CONF.rpc_response_timeout,
             timeout=CONF.long_rpc_timeout)
-        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_scheduler.end")
+        benchmark.add_benchmark(ctxt.request_id, "nova.conductor.rpc_call_scheduler.end", ctxt.get_vm_name() == "vm_flush")
         if ctxt.get_vm_name() == "vm_flush":
             benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
         return cctxt.call(ctxt, 'select_destinations', **msg_args)

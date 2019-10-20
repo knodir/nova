@@ -344,7 +344,7 @@ class ComputeTaskAPI(object):
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping, legacy_bdm=True,
             request_spec=None, host_lists=None):
-        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.start")
+        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.start", context.get_vm_name() == "vm_flush")
         image_p = jsonutils.to_primitive(image)
         kwargs = {"instances": instances, "image": image_p,
                   "filter_properties": filter_properties,
@@ -380,7 +380,7 @@ class ComputeTaskAPI(object):
 
         cctxt = self.client.prepare(version=version)
         cctxt.cast(context, 'build_instances', **kwargs)
-        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.end")
+        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.end", context.get_vm_name() == "vm_flush")
         if context.get_vm_name() == "vm_flush":
             benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
 
@@ -390,7 +390,7 @@ class ComputeTaskAPI(object):
                                      requested_networks,
                                      block_device_mapping,
                                      tags=None):
-        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.start")
+        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.start", context.get_vm_name() == "vm_flush")
         version = '1.17'
         kw = {'build_requests': build_requests,
               'request_specs': request_specs,
@@ -407,7 +407,7 @@ class ComputeTaskAPI(object):
 
         cctxt = self.client.prepare(version=version)
         cctxt.cast(context, 'schedule_and_build_instances', **kw)
-        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.end")
+        benchmark.add_benchmark(context.request_id, "nova.api.rpc_call_conductor.end", context.get_vm_name() == "vm_flush")
         if context.get_vm_name() == "vm_flush":
             benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
 
