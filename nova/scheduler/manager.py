@@ -114,7 +114,7 @@ class SchedulerManager(manager.Manager):
         format but *don't* want to get alternate hosts, as is the case with the
         conductors that handle certain move operations.
         """
-        benchmark.add_benchmark(ctxt.request_id, "nova.scheduler.start", ctxt.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(ctxt.request_id, ctxt.get_vm_name(), "nova.scheduler.start", ctxt.get_vm_name() == "vm_flush")
         LOG.debug("Starting to schedule for instances: %s", instance_uuids)
 
         # TODO(sbauza): Change the method signature to only accept a spec_obj
@@ -173,9 +173,9 @@ class SchedulerManager(manager.Manager):
         if not return_objects:
             selection_dicts = [sel[0].to_dict() for sel in selections]
             return jsonutils.to_primitive(selection_dicts)
-        benchmark.add_benchmark(ctxt.request_id, "nova.scheduler.end", ctxt.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(ctxt.request_id, ctxt.get_vm_name(), "nova.scheduler.end", ctxt.get_vm_name() == "vm_flush")
         if ctxt.get_vm_name() == "vm_flush":
-            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks_novascheduler.log")
         return selections
 
     def update_aggregates(self, ctxt, aggregates):

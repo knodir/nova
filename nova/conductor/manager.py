@@ -1318,7 +1318,7 @@ class ComputeTaskManager(base.Base):
                                      admin_password, injected_files,
                                      requested_networks, block_device_mapping,
                                      tags=None):
-        benchmark.add_benchmark(context.request_id, "nova.conductor.start", context.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(context.request_id, context.get_vm_name(), "nova.conductor.start", context.get_vm_name() == "vm_flush")
         # Add all the UUIDs for the instances
         instance_uuids = [spec.instance_uuid for spec in request_specs]
         try:
@@ -1498,9 +1498,9 @@ class ComputeTaskManager(base.Base):
                     block_device_mapping=instance_bdms,
                     host=host.service_host, node=host.nodename,
                     limits=host.limits, host_list=host_list)
-        benchmark.add_benchmark(context.request_id, "nova.conductor.end", context.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(context.request_id, context.get_vm_name(), "nova.conductor.end", context.get_vm_name() == "vm_flush")
         if context.get_vm_name() == "vm_flush":
-            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks_novaconductor.log")
 
     def _cleanup_build_artifacts(self, context, exc, instances, build_requests,
                                  request_specs, block_device_mappings, tags,

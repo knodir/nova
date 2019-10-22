@@ -81,7 +81,7 @@ class BaseFilterHandler(loadables.BaseLoader):
         full_filter_results = []
         log_msg = "%(cls_name)s: (start: %(start)s, end: %(end)s)"
 
-        benchmark.add_benchmark(spec_obj.get_req_id(), "nova.scheduler.filtering.start", spec_obj.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(spec_obj.get_req_id(), spec_obj.get_vm_name(), "nova.scheduler.filtering.start", spec_obj.get_vm_name() == "vm_flush")
         for filter_ in filters:
             if filter_.run_filter_for_index(index):
                 cls_name = filter_.__class__.__name__
@@ -106,9 +106,9 @@ class BaseFilterHandler(loadables.BaseLoader):
                 LOG.debug("Filter %(cls_name)s returned "
                           "%(obj_len)d host(s)",
                           {'cls_name': cls_name, 'obj_len': len(list_objs)})
-        benchmark.add_benchmark(spec_obj.get_req_id(), "nova.scheduler.filtering.end", spec_obj.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(spec_obj.get_req_id(), spec_obj.get_vm_name(), "nova.scheduler.filtering.end", spec_obj.get_vm_name() == "vm_flush")
         if spec_obj.get_vm_name() == "vm_flush":
-            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks_novascheduler.log")
 
         if not list_objs:
             # Log the filtration history

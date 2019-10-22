@@ -1199,7 +1199,7 @@ class API(base.Base):
         creation.
         """
         context.set_vm_name(display_name)
-        benchmark.add_benchmark(context.request_id, "nova.api.start", context.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(context.request_id, context.get_vm_name(), "nova.api.start", context.get_vm_name() == "vm_flush")
 
         # Normalize and setup some parameters
         if reservation_id is None:
@@ -1327,9 +1327,9 @@ class API(base.Base):
                 block_device_mapping=block_device_mapping,
                 tags=tags)
         
-        benchmark.add_benchmark(context.request_id, "nova.api.end", context.get_vm_name() == "vm_flush")
+        benchmark.add_benchmark(context.request_id, context.get_vm_name(), "nova.api.end", context.get_vm_name() == "vm_flush")
         if context.get_vm_name() == "vm_flush":
-            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks.log")
+            benchmark.flush_benchmarks("/opt/stack/npp_benchmarks_novaapi.log")
 
         return instances, reservation_id
 
