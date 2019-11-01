@@ -136,8 +136,7 @@ class SchedulerManager(manager.Manager):
                 raise exception.NoValidHost(reason=e.message)
 
             resources = utils.resources_from_request_spec(spec_obj)
-            res = self.placement_client.get_allocation_candidates(ctxt,
-                                                                  resources)
+            res = self.placement_client.get_all_allocation_candidates(ctxt)
             if res is None:
                 # We have to handle the case that we failed to connect to the
                 # Placement service and the safe_connect decorator on

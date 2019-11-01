@@ -333,6 +333,33 @@ class SchedulerReportClient(object):
         return None, None, None
 
     @safe_connect
+    def get_all_allocation_candidates(self, context):
+        """Get all allocation candidates for npp scheduler filters """
+        version = NESTED_AC_VERSION
+         # query param for all cpu, ram, disk
+        qparams = "resources=VCPU:1,DISK_GB:1,MEMORY_MB:1"
+        # query param for all network
+        qparams_network = "resources=CUSTOM_PAIRWISE_BANDWIDTH_MBITPS:1"
+
+        url = "/allocation_candidates?%s" % qparams
+        url_network = "/allocation_candidates?%s" % qparams
+        resp = self.get(url, version=version, global_request_id=context.global_id)
+        resp_network = self.get(url_network, version=version, 
+            global_request_id=context.global_id)
+
+        if resp.status_code == 200 and resp_network.status_code == 200:
+            data = resp.json()
+            data_network = resp_network.json()
+            provider_summaries = dict()
+            provider_summaries.update(data['provider_summaries'])
+            provider_summaries.update(data_network['provider_summaries'])
+            allocation_requests = data['allocation_requests'] + data_network['allocation_requests']
+
+            return (allocation_requests, provider_summaries, version)
+
+        return None, None, None
+
+    @safe_connect
     def _get_provider_aggregates(self, context, rp_uuid):
         """Queries the placement API for a resource provider's aggregates.
 
