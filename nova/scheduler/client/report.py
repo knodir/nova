@@ -339,10 +339,10 @@ class SchedulerReportClient(object):
          # query param for all cpu, ram, disk
         qparams = "resources=VCPU:1,DISK_GB:1,MEMORY_MB:1"
         # query param for all network
-        qparams_network = "resources=CUSTOM_PAIRWISE_BANDWIDTH_MBITPS:1"
+        qparams_npp_custom = "resources=CUSTOM_NPP_RESOURCE:1"
 
         url = "/allocation_candidates?%s" % qparams
-        url_network = "/allocation_candidates?%s" % qparams
+        url_network = "/allocation_candidates?%s" % qparams_npp_custom
         resp = self.get(url, version=version, global_request_id=context.global_id)
         resp_network = self.get(url_network, version=version, 
             global_request_id=context.global_id)
