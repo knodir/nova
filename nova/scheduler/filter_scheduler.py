@@ -155,27 +155,31 @@ class FilterScheduler(driver.Scheduler):
         #     provider_summaries)
         
         def build_simulated_host_state(provider, summary):
-            cpu_used = summary["resources"]["VCPU"]["used"]
-            cpu_capacity = summary["resources"]["VCPU"]["capacity"]
-            ram_used = summary["resources"]["MEMORY_MB"]["used"]
-            ram_capacity = summary["resources"]["MEMORY_MB"]["capacity"]
-            disk_used = summary["resources"]["DISK_GB"]["used"]
-            disk_capacity = summary["resources"]["DISK_GB"]["capacity"]
             hs = HostState(CONF.npp.simulated_host, CONF.npp.simulated_host, 
                 CONF.npp.target_cell_uuid)
-
             hs.uuid = provider
-            hs.total_usable_ram_mb = ram_capacity
-            hs.total_usable_disk_gb = disk_capacity
-            hs.disk_mb_used = disk_used * 1000
-            hs.free_ram_mb = ram_capacity - ram_used
-            hs.free_disk_mb = disk_capacity * 100 - disk_used * 1000
-            hs.vcpus_total = cpu_capacity
-            hs.vcpus_used = cpu_used
-            hs.ram_allocation_ratio = 1
-            hs.cpu_allocation_ratio = 1
-            hs.disk_allocation_ratio = 1
             hs.failed_builds = 0
+
+            # current openstack host_state is only compatible with non-npp custom resource types
+            if "VCPU" in summary["resources"] and "MEMORY_MB" in summary["resources"] and "DISK_GB" in summary["resources"]:
+                cpu_used = summary["resources"]["VCPU"]["used"]
+                cpu_capacity = summary["resources"]["VCPU"]["capacity"]
+                ram_used = summary["resources"]["MEMORY_MB"]["used"]
+                ram_capacity = summary["resources"]["MEMORY_MB"]["capacity"]
+                disk_used = summary["resources"]["DISK_GB"]["used"]
+                disk_capacity = summary["resources"]["DISK_GB"]["capacity"]
+                
+                hs.total_usable_ram_mb = ram_capacity
+                hs.total_usable_disk_gb = disk_capacity
+                hs.disk_mb_used = disk_used * 1000
+                hs.free_ram_mb = ram_capacity - ram_used
+                hs.free_disk_mb = disk_capacity * 100 - disk_used * 1000
+                hs.vcpus_total = cpu_capacity
+                hs.vcpus_used = cpu_used
+                hs.ram_allocation_ratio = 1
+                hs.cpu_allocation_ratio = 1
+                hs.disk_allocation_ratio = 1
+            
             return hs
         
         hosts = (build_simulated_host_state(provider, summary) \
